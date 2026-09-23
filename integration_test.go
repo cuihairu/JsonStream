@@ -1,0 +1,764 @@
+package jsonstream
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"net"
+	"runtime"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+type item struct {
+	N int `json:"n"`
+}
+
+func bytesReader(b []byte) *bytes.Reader { return bytes.NewReader(b) }
+
+// ---- 心跳 ----
+
+// TestHeartbeatKeepsIdleConnectionAlive：连接上无任何业务流量，仅靠
+// PING/PONG 保活，持续多个心跳周期后依然可用。
+func TestHeartbeatKeepsIdleConnectionAlive(t *testing.T) {
+	cfg := shortConfig()
+	cfg.Heartbeat = 100 * time.Millisecond
+	_, addr := startTestServer(t, cfg, func(s *Server) {
+		s.Handle("ping", func(req *Request) (any, error) { return item{N: 1}, nil })
+	})
+	c := dialTest(t, addr, cfg)
+	time.Sleep(500 * time.Millisecond) // ≥ 4 个心跳周期
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	m, err := c.Request(ctx, "ping", nil)
+	if err != nil {
+		t.Fatalf("connection should survive idle period via heartbeat: %v", err)
+	}
+	var it item
+	if err := m.Decode(&it); err != nil || it.N != 1 {
+		t.Fatalf("unexpected response: %v %v", it, err)
+	}
+}
+
+// TestTransportReadIdleTimeout：读空闲超过 1.5×心跳，transport 必须自杀。
+func TestTransportReadIdleTimeout(t *testing.T) {
+	c1, c2 := net.Pipe()
+	defer c2.Close()
+	cfg := shortConfig()
+	cfg.Heartbeat = 50 * time.Millisecond
+	tr := newTransport(c1, c1, &transformer{}, &cfg, 0)
+	tr.start(func(f *Frame) error { return nil }, nil)
+	// c2 保持沉默：既不发 PING 也不发业务帧。
+	select {
+	case <-tr.dead:
+		// 预期：约 75ms 后读超时断开
+	case <-time.After(2 * time.Second):
+		t.Fatal("transport was not killed after read idle timeout")
+	}
+}
+
+// TestSilentPeerDisconnectedByHeartbeat：完成握手后不再发送任何帧的对端
+// （连 PING 都不发）会被心跳超时清理。
+func TestSilentPeerDisconnectedByHeartbeat(t *testing.T) {
+	cfg := shortConfig()
+	cfg.Heartbeat = 100 * time.Millisecond
+	_, addr := startTestServer(t, cfg, nil)
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	cj := &connectJSON{Version: int(ProtocolVersion)}
+	f, _ := connectFrame(cj)
+	if err := writeOnce(conn, f); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFrame(conn); err != nil { // CONNACK
+		t.Fatal(err)
+	}
+	// 之后保持沉默：server 应在 ~150ms 读超时后断开。期间 server 的写循环
+	// 仍会发 PING（写入本端接收缓冲），读到控制帧应忽略，最终必然 EOF。
+	deadline := time.Now().Add(3 * time.Second)
+	conn.SetReadDeadline(deadline)
+	for {
+		if _, err := ReadFrame(conn); err != nil {
+			return // 服务端心跳超时断开 ✔
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("silent connection should be closed by server heartbeat timeout")
+		}
+	}
+}
+
+// ---- 断线重连恢复 ----
+
+// TestResumeReplaysPendingFrames：流式响应读到一半断线，重连成功（resumed）
+// 后服务端重放断开期间产生的帧，流从调用方视角无缝继续。
+func TestResumeReplaysPendingFrames(t *testing.T) {
+	continueCh := make(chan struct{})
+	_, addr := startTestServer(t, shortConfig(), func(s *Server) {
+		s.HandleStream("slow", func(req *Request, em Emitter) error {
+			for i := 1; i <= 2; i++ {
+				if err := em.Emit(item{N: i}); err != nil {
+					return err
+				}
+			}
+			<-continueCh // 测试在这里掐断连接，之后再放行
+			for i := 3; i <= 4; i++ {
+				if err := em.Emit(item{N: i}); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	})
+
+	cfg := shortConfig() // Reconnect 默认开启，BackoffInitial=5ms
+	c := dialTest(t, addr, cfg)
+	reconnected := make(chan struct{}, 4)
+	c.OnReconnect(func() { reconnected <- struct{}{} })
+
+	ctx := context.Background()
+	stream, err := c.Stream(ctx, "slow", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidBefore := c.SessionID()
+
+	m, ok := stream.Next(ctx)
+	if !ok || m.Decode(&item{}) != nil {
+		t.Fatalf("expected frame 1, ok=%v", ok)
+	}
+	var i1 item
+	if err := m.Decode(&i1); err != nil || i1.N != 1 {
+		t.Fatalf("want n=1, got %+v err=%v", i1, err)
+	}
+	m, ok = stream.Next(ctx)
+	var i2 item
+	if err := m.Decode(&i2); err != nil || i2.N != 2 {
+		t.Fatalf("want n=2, got %+v err=%v", i2, err)
+	}
+
+	// 掐断底层 TCP，模拟网络故障。
+	c.mu.Lock()
+	tr := c.ep.tr
+	c.mu.Unlock()
+	tr.kill(errors.New("simulated network failure"))
+	time.Sleep(100 * time.Millisecond) // 让服务端先走完 unbind（否则在途帧语义不保）
+	close(continueCh)                  // 服务端 handler 继续 emit → 进入会话保留队列
+
+	select {
+	case <-reconnected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("client did not reconnect")
+	}
+	if c.SessionID() != sidBefore {
+		t.Fatalf("session id changed across resume: %s -> %s", sidBefore, c.SessionID())
+	}
+
+	// 同一条流应继续吐出重放的帧。
+	for want := 3; want <= 4; want++ {
+		m, ok := stream.Next(ctx)
+		if !ok {
+			t.Fatalf("expected replayed frame %d, stream ended (err=%v)", want, stream.Err())
+		}
+		var it item
+		if err := m.Decode(&it); err != nil || it.N != want {
+			t.Fatalf("want n=%d, got %+v err=%v", want, it, err)
+		}
+	}
+	m, ok = stream.Next(ctx)
+	if ok {
+		t.Fatalf("unexpected extra frame: %v", m)
+	}
+	if err := stream.Err(); err != nil {
+		t.Fatalf("stream should end cleanly after replay, got %v", err)
+	}
+}
+
+// TestResumeExpiredFailsPendingAndResubscribes：会话恢复失败（服务端禁用
+// 保留）时：挂起请求以 SESSION_EXPIRED 失败、OnResumeFailed 触发、订阅自动
+// 重订后广播继续可达。
+func TestResumeExpiredFailsPendingAndResubscribes(t *testing.T) {
+	blockCh := make(chan struct{})
+	var srv *Server
+	_, addr := startTestServer(t, func() Config {
+		cfg := shortConfig()
+		cfg.Retention = -1 // 禁用会话保留 → 重连必然恢复失败
+		return cfg
+	}(), func(s *Server) {
+		srv = s
+		s.Handle("hang", func(req *Request) (any, error) {
+			<-blockCh // 挂起请求，制造断线时的 in-flight 流
+			return item{N: 1}, nil
+		})
+	})
+
+	cfg := shortConfig()
+	c := dialTest(t, addr, cfg)
+
+	got := make(chan int, 8)
+	sub, err := c.Subscribe(context.Background(), "news", func(msg *Message) error {
+		var it item
+		if err := msg.Decode(&it); err != nil {
+			return err
+		}
+		got <- it.N
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Publish("news", item{N: 1}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case n := <-got:
+		if n != 1 {
+			t.Fatalf("want 1, got %d", n)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no first broadcast")
+	}
+
+	resumeFailed := make(chan error, 1)
+	c.OnResumeFailed(func(err error) { resumeFailed <- err })
+
+	type reqResult struct {
+		m   *Message
+		err error
+	}
+	reqCh := make(chan reqResult, 1)
+	go func() {
+		m, err := c.Request(context.Background(), "hang", nil)
+		reqCh <- reqResult{m, err}
+	}()
+	time.Sleep(100 * time.Millisecond) // 等请求到达服务端并挂起
+
+	c.mu.Lock()
+	tr := c.ep.tr
+	c.mu.Unlock()
+	tr.kill(errors.New("simulated network failure"))
+	// 重连很快（backoff 只有一拍），必须等服务端先感知断连并在
+	// Retention=-1 下 drop 旧会话；否则重连会被 takeover 判为恢复成功。
+	// 按「旧会话 ID 消失」等待，而非 sessions 为空——重连成功后 store
+	// 里出现的是新会话。
+	oldID := c.SessionID()
+	waitDeadline := time.Now().Add(2 * time.Second)
+	for {
+		srv.store.mu.Lock()
+		_, present := srv.store.sessions[oldID]
+		srv.store.mu.Unlock()
+		if !present {
+			break
+		}
+		if time.Now().After(waitDeadline) {
+			t.Fatal("server did not drop expired session in time")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	close(blockCh)
+
+	select {
+	case err := <-resumeFailed:
+		var je *Error
+		if !errors.As(err, &je) || je.Code != CodeSessionExpired {
+			t.Fatalf("want SESSION_EXPIRED, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnResumeFailed not fired")
+	}
+	select {
+	case r := <-reqCh:
+		var je *Error
+		if !errors.As(r.err, &je) || je.Code != CodeSessionExpired {
+			t.Fatalf("pending request should fail with SESSION_EXPIRED, got %v", r.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("pending request neither failed nor returned")
+	}
+
+	// 订阅应已自动重订：断线后的广播仍能送达。
+	if err := srv.Publish("news", item{N: 2}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case n := <-got:
+		if n != 2 {
+			t.Fatalf("want 2, got %d", n)
+		}
+	case <-time.After(2 * time.Second):
+		c.mu.Lock()
+		subs := len(c.subs)
+		epStreams := len(c.ep.streams)
+		c.mu.Unlock()
+		srv.mu.Lock()
+		srvSubs := map[uint32]string{}
+		for sc := range srv.conns {
+			for id, tp := range sc.sess.subs {
+				srvSubs[id] = tp
+			}
+		}
+		srvConns := len(srv.conns)
+		srv.mu.Unlock()
+		buf := make([]byte, 1<<16)
+		n := runtime.Stack(buf, true)
+		t.Fatalf("broadcast after resubscribe not delivered (client subs=%d epStreams=%d; srv conns=%d subs=%v)\n%s",
+			subs, epStreams, srvConns, srvSubs, buf[:n])
+	}
+	_ = sub
+}
+
+// ---- 六种消息模式 ----
+
+func setupModeServer(t *testing.T) string {
+	_, addr := startTestServer(t, shortConfig(), func(s *Server) {
+		// 1. 请求/响应
+		s.Handle("echo", func(req *Request) (any, error) {
+			var it item
+			if err := req.Decode(&it); err != nil {
+				return nil, &Error{Code: CodeInvalid, Message: err.Error()}
+			}
+			return item{N: it.N * 2}, nil
+		})
+		// 2. 流式
+		s.HandleStream("range", func(req *Request, em Emitter) error {
+			var it item
+			if err := req.Decode(&it); err != nil {
+				return err
+			}
+			for i := 0; i < it.N; i++ {
+				if err := em.Emit(item{N: i}); err != nil {
+					return err
+				}
+			}
+			return nil // 自动 COMPLETE
+		})
+		// 3. 双工
+		s.HandleChannel("chat", func(ch *Channel) error {
+			for {
+				m, err := ch.Receive(context.Background())
+				if err != nil {
+					return nil // EOF（对端 Close）或取消
+				}
+				var it item
+				if err := m.Decode(&it); err != nil {
+					return err
+				}
+				if err := ch.Send(item{N: it.N + 100}); err != nil {
+					return err
+				}
+			}
+		})
+		// 4. 单向
+		s.HandleOneWay("notify", func(msg *Message) error {
+			return nil // 送达断言由 TestModeOneWay 独立完成
+		})
+		// 6. 错误
+		s.Handle("boom", func(req *Request) (any, error) {
+			return nil, &Error{Code: CodeBusy, Message: "overloaded on purpose"}
+		})
+		s.Handle("panic", func(req *Request) (any, error) {
+			panic("handler exploded")
+		})
+		s.Handle("plain-err", func(req *Request) (any, error) {
+			return nil, errors.New("plain failure")
+		})
+	})
+	return addr
+}
+
+func TestModeRequestResponse(t *testing.T) {
+	addr := setupModeServer(t)
+	c := dialTest(t, addr, shortConfig())
+	ctx := context.Background()
+
+	m, err := c.Request(ctx, "echo", item{N: 21})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var it item
+	if err := m.Decode(&it); err != nil || it.N != 42 {
+		t.Fatalf("want 42, got %+v err=%v", it, err)
+	}
+
+	// 未知路由 → NOT_FOUND
+	_, err = c.Request(ctx, "nope", nil)
+	var je *Error
+	if !errors.As(err, &je) || je.Code != CodeNotFound {
+		t.Fatalf("want NOT_FOUND, got %v", err)
+	}
+}
+
+func TestModeStreaming(t *testing.T) {
+	addr := setupModeServer(t)
+	c := dialTest(t, addr, shortConfig())
+	ctx := context.Background()
+
+	st, err := c.Stream(ctx, "range", item{N: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for want := 0; want < 5; want++ {
+		m, ok := st.Next(ctx)
+		if !ok {
+			t.Fatalf("stream ended early at %d (err=%v)", want, st.Err())
+		}
+		var it item
+		if err := m.Decode(&it); err != nil || it.N != want {
+			t.Fatalf("want n=%d, got %+v err=%v", want, it, err)
+		}
+	}
+	if m, ok := st.Next(ctx); ok {
+		t.Fatalf("unexpected extra frame %v", m)
+	}
+	if err := st.Err(); err != nil {
+		t.Fatalf("clean stream should have nil Err, got %v", err)
+	}
+}
+
+func TestModeStreamingCancel(t *testing.T) {
+	addr := setupModeServer(t)
+	c := dialTest(t, addr, shortConfig())
+	ctx := context.Background()
+	st, err := c.Stream(ctx, "range", item{N: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.Next(ctx); !ok {
+		t.Fatal("no first frame")
+	}
+	if err := st.Cancel(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.Next(ctx); ok {
+		t.Fatal("stream should be over after cancel")
+	}
+	var je *Error
+	if !errors.As(st.Err(), &je) || je.Code != CodeCancelled {
+		t.Fatalf("want CANCELLED, got %v", st.Err())
+	}
+}
+
+func TestModeDuplex(t *testing.T) {
+	addr := setupModeServer(t)
+	c := dialTest(t, addr, shortConfig())
+	ctx := context.Background()
+
+	ch, err := c.Channel(ctx, "chat", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := ch.Send(item{N: i}); err != nil {
+			t.Fatal(err)
+		}
+		m, err := ch.Receive(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var it item
+		if err := m.Decode(&it); err != nil || it.N != i+100 {
+			t.Fatalf("want %d, got %+v err=%v", i+100, it, err)
+		}
+	}
+	if err := ch.Close(); err != nil { // 半关闭：我说完了
+		t.Fatal(err)
+	}
+	if _, err := ch.Receive(ctx); !errors.Is(err, ErrClosed) && !errors.Is(err, context.DeadlineExceeded) {
+		// 本端已终结：Receive 立即返回（EOF 或关闭错误都算合理实现）
+	}
+}
+
+func TestModeOneWay(t *testing.T) {
+	got := make(chan int, 8)
+	_, addr := startTestServer(t, shortConfig(), func(s *Server) {
+		s.HandleOneWay("notify", func(msg *Message) error {
+			var it item
+			_ = msg.Decode(&it)
+			got <- it.N
+			return nil
+		})
+	})
+	c := dialTest(t, addr, shortConfig())
+	if err := c.SendOneWay("notify", item{N: 7}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case n := <-got:
+		if n != 7 {
+			t.Fatalf("want 7, got %d", n)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("oneway message not delivered")
+	}
+	// 路由不存在也必须静默（协议规定 ONEWAY 永不回帧）。
+	if err := c.SendOneWay("missing", item{N: 1}); err != nil {
+		t.Fatalf("oneway to missing route must not error: %v", err)
+	}
+}
+
+func TestModePubSub(t *testing.T) {
+	// 服务端 → 客户端广播
+	var srv *Server
+	_, addr := startTestServer(t, shortConfig(), func(s *Server) { srv = s })
+	c := dialTest(t, addr, shortConfig())
+
+	got := make(chan int, 8)
+	sub, err := c.Subscribe(context.Background(), "ticks", func(msg *Message) error {
+		var it item
+		if err := msg.Decode(&it); err != nil {
+			return err
+		}
+		got <- it.N
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 3; i++ {
+		if err := srv.Publish("ticks", item{N: i}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case n := <-got:
+			if n != i {
+				t.Fatalf("want %d, got %d", i, n)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("broadcast %d not delivered", i)
+		}
+	}
+	// 退订后不再投递
+	if err := sub.Close(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if err := srv.Publish("ticks", item{N: 99}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case n := <-got:
+		t.Fatalf("should not receive after unsubscribe, got %d", n)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// 客户端 → 服务端发布，服务端处理后再广播回来（双向主题）
+	_, addr2 := startTestServer(t, shortConfig(), func(s *Server) {
+		s.HandlePublish("events", func(msg *Message) error {
+			var it item
+			if err := msg.Decode(&it); err != nil {
+				return err
+			}
+			return s.Publish("mirror", item{N: it.N * 10})
+		})
+	})
+	c2 := dialTest(t, addr2, shortConfig())
+	mirror := make(chan int, 4)
+	if _, err := c2.Subscribe(context.Background(), "mirror", func(msg *Message) error {
+		var it item
+		if err := msg.Decode(&it); err != nil {
+			return err
+		}
+		mirror <- it.N
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c2.Publish("events", item{N: 5}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case n := <-mirror:
+		if n != 50 {
+			t.Fatalf("want 50, got %d", n)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("client→server publish roundtrip failed")
+	}
+}
+
+func TestModeErrorPropagation(t *testing.T) {
+	addr := setupModeServer(t)
+	c := dialTest(t, addr, shortConfig())
+	ctx := context.Background()
+
+	// 带 code 的流错误原样传播
+	_, err := c.Request(ctx, "boom", nil)
+	var je *Error
+	if !errors.As(err, &je) || je.Code != CodeBusy || je.Message != "overloaded on purpose" {
+		t.Fatalf("want BUSY with message, got %v", err)
+	}
+	// 普通 error → INTERNAL
+	_, err = c.Request(ctx, "plain-err", nil)
+	if !errors.As(err, &je) || je.Code != CodeInternal {
+		t.Fatalf("want INTERNAL, got %v", err)
+	}
+	// panic → INTERNAL，且连接仍然可用（错误只终结流）
+	_, err = c.Request(ctx, "panic", nil)
+	if !errors.As(err, &je) || je.Code != CodeInternal {
+		t.Fatalf("want INTERNAL for panic, got %v", err)
+	}
+	m, err := c.Request(ctx, "echo", item{N: 2})
+	if err != nil {
+		t.Fatalf("connection should survive handler errors: %v", err)
+	}
+	var it item
+	_ = m.Decode(&it)
+	if it.N != 4 {
+		t.Fatalf("want 4, got %d", it.N)
+	}
+}
+
+// ---- 背压 ----
+
+// TestBackpressureBlocksSender：credit 窗口为 4 时，接收方不消费，发送方
+// 必须恰好发出 4 条后阻塞；恢复消费后应全部送达并以 COMPLETE 收尾。
+func TestBackpressureBlocksSender(t *testing.T) {
+	const window = 4
+	const total = 10
+	var emitted int32
+	done := make(chan struct{})
+	scfg := shortConfig()
+	scfg.Credit = window
+	_, addr := startTestServer(t, scfg, func(s *Server) {
+		s.HandleStream("firehose", func(req *Request, em Emitter) error {
+			for i := 0; i < total; i++ {
+				if err := em.Emit(item{N: i}); err != nil {
+					return err
+				}
+				atomic.AddInt32(&emitted, 1)
+			}
+			close(done)
+			return nil
+		})
+	})
+
+	ccfg := shortConfig()
+	ccfg.Credit = window
+	c := dialTest(t, addr, ccfg)
+	ctx := context.Background()
+	st, err := c.Stream(ctx, "firehose", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 不消费：给发送方充分时间冲进 credit 墙。
+	time.Sleep(300 * time.Millisecond)
+	if got := atomic.LoadInt32(&emitted); got != window {
+		t.Fatalf("sender should be blocked at window=%d, emitted=%d", window, got)
+	}
+	select {
+	case <-done:
+		t.Fatal("handler finished without consumer (backpressure failed)")
+	default:
+	}
+
+	// 恢复消费：全部送达。
+	for want := 0; want < total; want++ {
+		m, ok := st.Next(ctx)
+		if !ok {
+			t.Fatalf("stream ended at %d (err=%v)", want, st.Err())
+		}
+		var it item
+		if err := m.Decode(&it); err != nil || it.N != want {
+			t.Fatalf("want n=%d, got %+v err=%v", want, it, err)
+		}
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not finish after consumer drained")
+	}
+	if _, ok := st.Next(ctx); ok || st.Err() != nil {
+		t.Fatalf("stream should end cleanly: ok=%v err=%v", ok, st.Err())
+	}
+}
+
+// TestNoBackpressureByDefault：未启用 credit 时发送方不被阻塞。
+func TestNoBackpressureByDefault(t *testing.T) {
+	const total = 64
+	var emitted int32
+	_, addr := startTestServer(t, shortConfig(), func(s *Server) {
+		s.HandleStream("bulk", func(req *Request, em Emitter) error {
+			for i := 0; i < total; i++ {
+				if err := em.Emit(item{N: i}); err != nil {
+					return err
+				}
+				atomic.AddInt32(&emitted, 1)
+			}
+			return nil
+		})
+	})
+	c := dialTest(t, addr, shortConfig()) // Credit=0
+	ctx := context.Background()
+	st, err := c.Stream(ctx, "bulk", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(2 * time.Second)
+	for atomic.LoadInt32(&emitted) < total {
+		select {
+		case <-deadline:
+			t.Fatalf("sender blocked without credit: emitted=%d", atomic.LoadInt32(&emitted))
+		default:
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	if _, ok := st.Next(ctx); !ok {
+		t.Fatal("expected at least one frame")
+	}
+}
+
+// ---- 连接级错误 ----
+
+// TestConnectionLevelErrorCloses：Stream ID=0 的 ERROR 表示连接级致命错误，
+// 客户端必须断开（protocol.md §7.10）。
+func TestConnectionLevelErrorCloses(t *testing.T) {
+	_, addr := startTestServer(t, shortConfig(), nil)
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	f, _ := connectFrame(&connectJSON{Version: int(ProtocolVersion)})
+	if err := writeOnce(conn, f); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFrame(conn); err != nil { // CONNACK
+		t.Fatal(err)
+	}
+	ef := errorFrame(0, &Error{Code: CodeProtocol, Message: "fatal"})
+	if err := writeOnce(conn, ef); err != nil {
+		t.Fatal(err)
+	}
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 16)
+	for {
+		if _, err := conn.Read(buf); err != nil {
+			return // 服务端断开 ✔
+		}
+	}
+}
+
+func TestCreditFrameRoundTrip(t *testing.T) {
+	cp := creditPayload{N: 3}
+	f := &Frame{Header: Header{Version: ProtocolVersion, Type: TypeCredit, StreamID: 5}, Payload: encodeCredit(cp.N)}
+	buf, err := f.appendTo(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadFrame(bytesReader(buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back creditPayload
+	if err := jsonUnmarshal(got.Payload, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.N != 3 {
+		t.Fatalf("want 3, got %d", back.N)
+	}
+}
