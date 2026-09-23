@@ -16,9 +16,10 @@
 *.dylib
 *.dll
 
-# Fortran module files
+# Fortran module files（排除 go.mod——这是 Go 模块定义，必须入库）
 *.mod
 *.smod
+!go.mod
 
 # Compiled Static libraries
 *.lai
