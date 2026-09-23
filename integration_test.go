@@ -950,3 +950,36 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 		t.Fatalf("want 2 from restarted server, got %+v err=%v", it, err)
 	}
 }
+
+// TestChannelHandlerError：双工通道的 handler 返回错误 → 错误帧回传，
+// 对端 Receive 以该错误收场；错误只终结流，连接仍可用。
+func TestChannelHandlerError(t *testing.T) {
+	srv, addr := startTestServer(t, shortConfig(), func(s *Server) {
+		s.HandleChannel("bad-chat", func(ch *Channel) error {
+			if _, err := ch.Receive(context.Background()); err != nil {
+				return err
+			}
+			return &Error{Code: CodeInvalid, Message: "bad chat on purpose"}
+		})
+		s.Handle("ping", func(req *Request) (any, error) { return item{N: 1}, nil })
+	})
+	_ = srv
+	c := dialTest(t, addr, shortConfig())
+	ctx := context.Background()
+
+	ch, err := c.Channel(ctx, "bad-chat", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.Send(item{N: 1}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = ch.Receive(ctx)
+	var je *Error
+	if !errors.As(err, &je) || je.Code != CodeInvalid || je.Message != "bad chat on purpose" {
+		t.Fatalf("want INVALID 'bad chat on purpose', got %v", err)
+	}
+	if _, err := c.Request(ctx, "ping", nil); err != nil {
+		t.Fatalf("connection should survive channel handler errors: %v", err)
+	}
+}
