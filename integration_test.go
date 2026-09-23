@@ -1092,3 +1092,172 @@ func TestEncryptedCompressedEndToEnd(t *testing.T) {
 		}
 	}
 }
+
+// TestResumeOverflowedSessionStartsFresh：断开期间保留队列超限 → 会话标记
+// overflowed、队列清空，重连时 resumed=false（诚实降级为全新会话）；
+// 订阅自动重订后广播继续可达（§8.1/§8.2 的溢出语义）。
+func TestResumeOverflowedSessionStartsFresh(t *testing.T) {
+	var srv *Server
+	scfg := shortConfig()
+	scfg.RetentionBytes = 512 // 故意调小：几帧广播即溢出
+	_, addr := startTestServer(t, scfg, func(s *Server) {
+		srv = s
+	})
+	ccfg := shortConfig()
+	ccfg.BackoffInitial = 300 * time.Millisecond // 拉长重连退避，给灌帧留出窗口
+	ccfg.BackoffMax = 300 * time.Millisecond
+	c := dialTest(t, addr, ccfg)
+	ctx := context.Background()
+
+	resumeFailed := make(chan error, 1)
+	c.OnResumeFailed(func(err error) { resumeFailed <- err })
+
+	got := make(chan int, 256)
+	sub, err := c.Subscribe(ctx, "news", func(msg *Message) error {
+		var it item
+		if err := msg.Decode(&it); err != nil {
+			return err
+		}
+		got <- it.N
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Close()
+	if err := srv.Publish("news", item{N: 1}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case n := <-got:
+		if n != 1 {
+			t.Fatalf("want 1, got %d", n)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no first broadcast")
+	}
+
+	// 掐断底层连接，等会话进入保留态（sess.conn == nil）
+	oldID := c.SessionID()
+	c.mu.Lock()
+	tr := c.ep.tr
+	c.mu.Unlock()
+	tr.kill(errors.New("simulated network failure"))
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		srv.store.mu.Lock()
+		ss := srv.store.sessions[oldID]
+		srv.store.mu.Unlock()
+		disconnected := false
+		if ss != nil {
+			ss.mu.Lock()
+			disconnected = ss.conn == nil
+			ss.mu.Unlock()
+		}
+		if disconnected {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("session did not enter retention")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// 断开期间灌入超限广播：溢出 → 清空队列并标记不可恢复
+	for i := 2; i < 100; i++ {
+		if err := srv.Publish("news", item{N: i}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	srv.store.mu.Lock()
+	ss := srv.store.sessions[oldID]
+	srv.store.mu.Unlock()
+	ss.mu.Lock()
+	overflowed := ss.overflowed
+	ss.mu.Unlock()
+	if !overflowed {
+		t.Fatal("session should be marked overflowed after flood")
+	}
+
+	// 重连 → resumed=false → OnResumeFailed；订阅自动重订，广播继续可达
+	select {
+	case <-resumeFailed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnResumeFailed not fired for overflowed session")
+	}
+	if c.SessionID() == oldID {
+		t.Fatal("client should have a fresh session after overflow")
+	}
+	if err := srv.Publish("news", item{N: 999}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case n := <-got:
+		if n != 999 {
+			t.Fatalf("want 999 after resubscribe, got %d", n)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no broadcast after resubscribe on fresh session")
+	}
+}
+
+// TestTakeoverKicksOldConnection：同会话新连接顶替旧连接——raw 连接携带
+// 客户端 session_id 接管：CONNACK resumed=true、旧连接立即死亡；客户端
+// 自动重连后反过来顶替 raw，业务恢复可用。
+func TestTakeoverKicksOldConnection(t *testing.T) {
+	_, addr := startTestServer(t, shortConfig(), func(s *Server) {
+		s.Handle("ping", func(req *Request) (any, error) { return item{N: 1}, nil })
+	})
+	c := dialTest(t, addr, shortConfig())
+	sid := c.SessionID()
+	c.mu.Lock()
+	oldDead := c.ep.tr.dead
+	c.mu.Unlock()
+
+	raw, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	cj := &connectJSON{Version: int(ProtocolVersion), SessionID: sid, HeartbeatMS: 1000}
+	f, _ := connectFrame(cj)
+	if err := writeOnce(raw, f); err != nil {
+		t.Fatal(err)
+	}
+	ack, err := ReadFrame(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ack.Type != TypeConnAck {
+		t.Fatalf("want CONNACK, got %s", ack.Type)
+	}
+	var aj connackJSON
+	if err := jsonUnmarshal(ack.Payload, &aj); err != nil {
+		t.Fatal(err)
+	}
+	if !aj.Resumed || aj.SessionID != sid {
+		t.Fatalf("want resumed session %s, got resumed=%v id=%q", sid, aj.Resumed, aj.SessionID)
+	}
+
+	// 旧连接被顶替后必须立刻死亡
+	select {
+	case <-oldDead:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old connection not killed by takeover")
+	}
+
+	// 客户端自动重连 → 反过来顶替 raw → 业务恢复
+	recoverDeadline := time.Now().Add(5 * time.Second)
+	for {
+		reqCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_, err := c.Request(reqCtx, "ping", nil)
+		cancel()
+		if err == nil {
+			return
+		}
+		if time.Now().After(recoverDeadline) {
+			t.Fatalf("client did not recover after takeover: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

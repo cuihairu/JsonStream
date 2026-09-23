@@ -71,29 +71,32 @@ func (s *Server) Publish(topic string, payload any) error {
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	conns := make([]*serverConn, 0, len(s.conns))
-	for sc := range s.conns {
-		conns = append(conns, sc)
+	// 遍历会话存储而非活跃连接：断开保留中的会话仍订阅着主题，
+	// 其投递经 sendDown 进入保留队列，重连后重放（§8.1「如广播消息」）。
+	// 锁序注意：store.mu 不与 ss.mu 嵌套持有（store.drop 是 store.mu→ss.mu，
+	// 此处先快照后逐会话取锁，无交叉）。
+	s.store.mu.Lock()
+	sessions := make([]*serverSession, 0, len(s.store.sessions))
+	for _, ss := range s.store.sessions {
+		sessions = append(sessions, ss)
 	}
-	s.mu.Unlock()
-	// 先在锁内收集匹配的订阅，锁外投递，避免 session 锁与 server 锁交叉。
+	s.store.mu.Unlock()
 	type target struct {
-		sc *serverSession
+		ss *serverSession
 		id uint32
 	}
 	var targets []target
-	for _, sc := range conns {
-		sc.sess.mu.Lock()
-		for id, t := range sc.sess.subs {
+	for _, ss := range sessions {
+		ss.mu.Lock()
+		for id, t := range ss.subs {
 			if t == topic {
-				targets = append(targets, target{sc.sess, id})
+				targets = append(targets, target{ss, id})
 			}
 		}
-		sc.sess.mu.Unlock()
+		ss.mu.Unlock()
 	}
 	for _, tg := range targets {
-		_ = tg.sc.sendDown(&Frame{
+		_ = tg.ss.sendDown(&Frame{
 			Header:   Header{Version: ProtocolVersion, Type: TypePublish, StreamID: tg.id},
 			Metadata: encodeMeta("", topic),
 			Payload:  data,
