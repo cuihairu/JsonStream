@@ -87,7 +87,7 @@ func (t *transformer) inbound(flagBits uint8, data []byte) ([]byte, error) {
 		}
 		plain, err := t.gcm.Open(nil, data[:ns], data[ns:], nil)
 		if err != nil {
-			return nil, fmt.Errorf("jsonstream: decrypt: %v", err)
+			return nil, fmt.Errorf("jsonstream: decrypt: %w", err)
 		}
 		data = plain
 	}
@@ -96,12 +96,12 @@ func (t *transformer) inbound(flagBits uint8, data []byte) ([]byte, error) {
 			return nil, &Error{Code: CodeUnsupported, Message: "received compressed frame but compression is disabled"}
 		}
 		r := flate.NewReader(bytes.NewReader(data))
-		out, err := readAll(r)
+		out, err := readAll(r, MaxPayloadSize)
 		if err != nil {
-			return nil, fmt.Errorf("jsonstream: decompress: %v", err)
+			return nil, fmt.Errorf("jsonstream: decompress: %w", err)
 		}
 		if err := r.Close(); err != nil {
-			return nil, fmt.Errorf("jsonstream: decompress: %v", err)
+			return nil, fmt.Errorf("jsonstream: decompress: %w", err)
 		}
 		data = out
 	}

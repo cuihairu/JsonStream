@@ -123,7 +123,9 @@ func (f *Frame) String() string {
 }
 
 // appendTo 把帧编码后追加到 dst（append 风格，便于复用缓冲）。
-// len(Metadata)>0 时自动置位 FlagHasMeta。
+// len(Metadata)>0 时自动置位 FlagHasMeta；flag 已置位时即使元数据为空
+// 也写 metaLen 段（长度 0）——否则重编码会产生「声称有 meta 却不带
+// metaLen」的自相矛盾帧，解析-编码不再是互逆（fuzz 实锤）。
 func (f *Frame) appendTo(dst []byte) ([]byte, error) {
 	if len(f.Metadata) > MaxMetadataSize {
 		return dst, fmt.Errorf("%w: metadata %d > %d", ErrMalformed, len(f.Metadata), MaxMetadataSize)
@@ -132,17 +134,15 @@ func (f *Frame) appendTo(dst []byte) ([]byte, error) {
 		return dst, fmt.Errorf("%w: payload %d > %d", ErrMalformed, len(f.Payload), MaxPayloadSize)
 	}
 	flags := f.Flags
-	metaLen := 0
 	if len(f.Metadata) > 0 {
 		flags |= FlagHasMeta
-		metaLen = len(f.Metadata)
 	}
 	dst = binary.BigEndian.AppendUint16(dst, magic0<<8|magic1)
 	dst = append(dst, f.Version, flags, byte(f.Type), 0)
 	dst = binary.BigEndian.AppendUint32(dst, f.StreamID)
 	dst = binary.BigEndian.AppendUint32(dst, uint32(len(f.Payload)))
-	if metaLen > 0 {
-		dst = binary.BigEndian.AppendUint16(dst, uint16(metaLen))
+	if flags&FlagHasMeta != 0 {
+		dst = binary.BigEndian.AppendUint16(dst, uint16(len(f.Metadata)))
 		dst = append(dst, f.Metadata...)
 	}
 	dst = append(dst, f.Payload...)

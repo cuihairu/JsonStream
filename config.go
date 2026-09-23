@@ -3,6 +3,7 @@ package jsonstream
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"time"
 )
@@ -12,10 +13,19 @@ func jsonUnmarshal(b []byte, v any) error {
 	return json.Unmarshal(b, v)
 }
 
-func readAll(r io.Reader) ([]byte, error) {
+// readAll 读取全部输出，解压结果超过 max 字节即报 Malformed。压缩比不受
+// 发送方约束：wire 侧 16MiB 的一帧 flate 可膨胀约三个数量级，不设上限
+// 等于把 OOM 开关交给对端（单帧即申请 GiB 级内存）。
+func readAll(r io.Reader, max int64) ([]byte, error) {
 	var buf bytes.Buffer
-	_, err := buf.ReadFrom(r)
-	return buf.Bytes(), err
+	n, err := io.Copy(&buf, io.LimitReader(r, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if n > max {
+		return nil, fmt.Errorf("%w: decompressed payload exceeds %d bytes", ErrMalformed, max)
+	}
+	return buf.Bytes(), nil
 }
 
 // Logger 是协议栈的日志接口，适配 *log.Logger 等常见实现。
