@@ -1261,3 +1261,82 @@ func TestTakeoverKicksOldConnection(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// TestRetentionExpiryStartsFresh：保留期自然到期（非禁用）——定时器触发
+// drop，重连时旧会话已不在存储中 → resumed=false、全新会话。
+func TestRetentionExpiryStartsFresh(t *testing.T) {
+	var srv *Server
+	scfg := shortConfig()
+	scfg.Retention = 100 * time.Millisecond // 短保留期：走定时器 drop 路径
+	_, addr := startTestServer(t, scfg, func(s *Server) {
+		srv = s
+	})
+	ccfg := shortConfig()
+	ccfg.BackoffInitial = 300 * time.Millisecond // 重连晚于过期，必然恢复失败
+	ccfg.BackoffMax = 300 * time.Millisecond
+	c := dialTest(t, addr, ccfg)
+
+	resumeFailed := make(chan error, 1)
+	c.OnResumeFailed(func(err error) { resumeFailed <- err })
+
+	sid := c.SessionID()
+	c.mu.Lock()
+	tr := c.ep.tr
+	c.mu.Unlock()
+	tr.kill(errors.New("simulated network failure"))
+
+	// 等保留定时器触发：旧会话从存储消失
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		srv.store.mu.Lock()
+		_, present := srv.store.sessions[sid]
+		srv.store.mu.Unlock()
+		if !present {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("expired session was not dropped by retention timer")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	select {
+	case <-resumeFailed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnResumeFailed not fired after retention expiry")
+	}
+	if c.SessionID() == sid {
+		t.Fatal("client should have a fresh session after retention expiry")
+	}
+}
+
+// TestRequestContextTimeout：请求超时由客户端 ctx 决定——Request 以
+// DeadlineExceeded 失败并终结该流，连接本身不受影响、后续请求正常。
+func TestRequestContextTimeout(t *testing.T) {
+	block := make(chan struct{})
+	_, addr := startTestServer(t, shortConfig(), func(s *Server) {
+		s.Handle("hang", func(req *Request) (any, error) {
+			<-block
+			return item{N: 1}, nil
+		})
+		s.Handle("ping", func(req *Request) (any, error) { return item{N: 2}, nil })
+	})
+	c := dialTest(t, addr, shortConfig())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	_, err := c.Request(ctx, "hang", nil)
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("want DeadlineExceeded, got %v", err)
+	}
+	close(block) // 放行服务端 handler：迟到的响应应被静默丢弃而非搞挂连接
+
+	m, err := c.Request(context.Background(), "ping", nil)
+	if err != nil {
+		t.Fatalf("connection should survive a timed-out request: %v", err)
+	}
+	var it item
+	if err := m.Decode(&it); err != nil || it.N != 2 {
+		t.Fatalf("want 2, got %+v err=%v", it, err)
+	}
+}
