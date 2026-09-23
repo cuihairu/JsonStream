@@ -7,6 +7,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net"
@@ -82,6 +83,25 @@ func main() {
 			time.Sleep(*broadcastEvery)
 			if err := srv.Publish("ticks", map[string]any{"tick": tick, "at": time.Now().Format(time.Kitchen)}); err != nil {
 				log.Printf("publish: %v", err)
+			}
+		}
+	}()
+
+	// ---- 服务端主动发起：向每个在线会话单向推送通知并请求 client.time ----
+	go func() {
+		for {
+			time.Sleep(3 * time.Second)
+			for _, sid := range srv.Sessions() {
+				if err := srv.SendOneWay(sid, "client.notice", map[string]string{"text": "server says hi"}); err != nil {
+					log.Printf("oneway to %s: %v", sid[:8], err)
+					continue
+				}
+				m, err := srv.Request(context.Background(), sid, "client.time", nil)
+				if err != nil {
+					log.Printf("request to %s: %v", sid[:8], err)
+					continue
+				}
+				log.Printf("client %s… time: %s", sid[:8], m.Payload)
 			}
 		}
 	}()

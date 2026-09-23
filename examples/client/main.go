@@ -32,6 +32,15 @@ func main() {
 	c.OnReconnect(func() { log.Printf("reconnected (session resumed)") })
 	c.OnResumeFailed(func(err error) { log.Printf("session lost: %v; state rebuilt", err) })
 
+	// ---- 服务端主动发起：客户端作为 responder 注册 handler ----
+	c.Handle("client.time", func(req *jsonstream.Request) (any, error) {
+		return map[string]string{"now": time.Now().Format(time.Kitchen)}, nil
+	})
+	c.HandleOneWay("client.notice", func(msg *jsonstream.Message) error {
+		log.Printf("server notice: %s", msg.Payload)
+		return nil
+	})
+
 	// ---- 发布/订阅：订阅 ticks 主题，后台收广播 ----
 	sub, err := c.Subscribe(ctx, "ticks", func(msg *jsonstream.Message) error {
 		log.Printf("broadcast: %s", msg.Payload)
