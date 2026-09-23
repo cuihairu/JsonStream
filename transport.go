@@ -29,15 +29,17 @@ type transport struct {
 	deadErr  error
 }
 
-func newTransport(conn net.Conn, reader io.Reader, tr *transformer, cfg *Config, creditWindow int) *transport {
+func newTransport(conn net.Conn, reader io.Reader, tr *transformer, cfg *Config, creditWindow int, handler func(*Frame) error, onDead func(error)) *transport {
 	t := &transport{
-		conn:   conn,
-		reader: reader,
-		tr:     tr,
-		cfg:    cfg,
-		log:    cfg.logger(),
-		sendCh: make(chan *Frame, 256),
-		dead:   make(chan struct{}),
+		conn:    conn,
+		reader:  reader,
+		tr:      tr,
+		cfg:     cfg,
+		log:     cfg.logger(),
+		sendCh:  make(chan *Frame, 256),
+		dead:    make(chan struct{}),
+		handler: handler,
+		onDead:  onDead,
 	}
 	if creditWindow > 0 {
 		t.credit = newCreditGate(creditWindow)
@@ -50,9 +52,9 @@ func (t *transport) readIdleTimeout() time.Duration {
 }
 
 // start 启动读写循环。握手完成（CONNECT/CONNACK 交换完毕）后调用。
-func (t *transport) start(handler func(*Frame) error, onDead func(error)) {
-	t.handler = handler
-	t.onDead = onDead
+// handler/onDead 在构造期即不可变：kill 可与 start 并发（连接注册先于
+// CONNACK 落网后，Close 可能在 start 之前 kill），二者必须无数据竞态。
+func (t *transport) start() {
 	go t.writeLoop()
 	go t.readLoop()
 }

@@ -328,8 +328,14 @@ func (c *Client) bindSession(conn net.Conn, br *bufio.Reader, aj *connackJSON) (
 		return nil, err
 	}
 
-	tr := newTransport(conn, br, tx, &cfg, cfg.Credit)
-	ep := newEndpoint(true, cfg, tr, c.table)
+	// endpoint 与 transport 互引用（tr 挂 ep 的分发回调、ep 持 tr），
+	// 用闭包晚绑定：tr.start 之前两者都已赋值，回调解引用安全。
+	var ep *endpoint
+	var tr *transport
+	tr = newTransport(conn, br, tx, &cfg, cfg.Credit,
+		func(f *Frame) error { return ep.handleFrame(f) },
+		func(err error) { c.onDead(tr)(err) })
+	ep = newEndpoint(true, cfg, tr, c.table)
 	_ = conn.SetDeadline(time.Time{}) // 清除握手 deadline，交由心跳超时接管
 
 	c.mu.Lock()
@@ -369,7 +375,7 @@ func (c *Client) bindSession(conn net.Conn, br *bufio.Reader, aj *connackJSON) (
 
 	// 启动读写循环：此后入站帧由 ep.handleFrame 分发，出站帧由写循环串行化。
 	// 重订与回调必须在循环启动之后——它们要收发帧（SUBACK）或触发应用动作。
-	tr.start(ep.handleFrame, c.onDead(tr))
+	tr.start()
 
 	for _, sub := range toResub {
 		c.resubscribeLocked(ep, sub)

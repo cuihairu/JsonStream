@@ -112,7 +112,7 @@ sub, _ := c.Subscribe(ctx, "ticks", func(m *jsonstream.Message) error { ... })
 _ = c.Publish("metrics", v)                                        // client → server
 ```
 
-服务端（`Server.Handle/HandleStream/HandleChannel/HandleOneWay/HandlePublish` + `Serve`）见 `examples/server/main.go`。
+服务端（`Server.Handle/HandleStream/HandleChannel/HandleOneWay/HandlePublish` + `Serve`）见 `examples/server/main.go`；服务端也可主动向指定会话发起交互（`Server.Sessions/Request/Stream/Channel/SendOneWay`，客户端以 `Handle*` 应答，Stream ID 按偶数分配）。
 
 # 文档
 

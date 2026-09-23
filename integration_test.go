@@ -47,8 +47,8 @@ func TestTransportReadIdleTimeout(t *testing.T) {
 	defer c2.Close()
 	cfg := shortConfig()
 	cfg.Heartbeat = 50 * time.Millisecond
-	tr := newTransport(c1, c1, &transformer{}, &cfg, 0)
-	tr.start(func(f *Frame) error { return nil }, nil)
+	tr := newTransport(c1, c1, &transformer{}, &cfg, 0, func(f *Frame) error { return nil }, nil)
+	tr.start()
 	// c2 保持沉默：既不发 PING 也不发业务帧。
 	select {
 	case <-tr.dead:
@@ -760,5 +760,193 @@ func TestCreditFrameRoundTrip(t *testing.T) {
 	}
 	if back.N != 3 {
 		t.Fatalf("want 3, got %d", back.N)
+	}
+}
+
+// ---- 服务端主动发起（odd/even 双向对等的另一半） ----
+
+// TestServerInitiatedModes：服务端向客户端会话主动发起四种交互，
+// 客户端以 Handle/HandleStream/HandleChannel/HandleOneWay 注册的 handler 应答。
+func TestServerInitiatedModes(t *testing.T) {
+	srv, addr := startTestServer(t, shortConfig(), nil)
+	c := dialTest(t, addr, shortConfig())
+	ctx := context.Background()
+
+	c.Handle("client.echo", func(req *Request) (any, error) {
+		var it item
+		if err := req.Decode(&it); err != nil {
+			return nil, &Error{Code: CodeInvalid, Message: err.Error()}
+		}
+		return item{N: it.N * 2}, nil
+	})
+	c.HandleStream("client.range", func(req *Request, em Emitter) error {
+		var it item
+		if err := req.Decode(&it); err != nil {
+			return err
+		}
+		for i := 0; i < it.N; i++ {
+			if err := em.Emit(item{N: i}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	c.HandleChannel("client.chat", func(ch *Channel) error {
+		m, err := ch.Receive(context.Background())
+		if err != nil {
+			return err
+		}
+		var it item
+		if err := m.Decode(&it); err != nil {
+			return err
+		}
+		return ch.Send(item{N: it.N + 200})
+	})
+	gotOneWay := make(chan item, 1)
+	c.HandleOneWay("client.log", func(msg *Message) error {
+		var it item
+		if err := msg.Decode(&it); err != nil {
+			return err
+		}
+		gotOneWay <- it
+		return nil
+	})
+
+	sid := c.SessionID()
+	if got := srv.Sessions(); len(got) != 1 || got[0] != sid {
+		t.Fatalf("Sessions() = %v, want [%s]", got, sid)
+	}
+
+	// 请求/响应
+	m, err := srv.Request(ctx, sid, "client.echo", item{N: 21})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var it item
+	if err := m.Decode(&it); err != nil || it.N != 42 {
+		t.Fatalf("echo: want 42, got %+v err=%v", it, err)
+	}
+
+	// 流式
+	rs, err := srv.Stream(ctx, sid, "client.range", item{N: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for want := 0; want < 3; want++ {
+		m, ok := rs.Next(ctx)
+		if !ok {
+			t.Fatalf("stream ended early at %d (err=%v)", want, rs.Err())
+		}
+		if err := m.Decode(&it); err != nil || it.N != want {
+			t.Fatalf("want n=%d, got %+v err=%v", want, it, err)
+		}
+	}
+	if _, ok := rs.Next(ctx); ok {
+		t.Fatal("unexpected extra frame")
+	}
+
+	// 双工
+	ch, err := srv.Channel(ctx, sid, "client.chat", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.Send(item{N: 5}); err != nil {
+		t.Fatal(err)
+	}
+	m, err = ch.Receive(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Decode(&it); err != nil || it.N != 205 {
+		t.Fatalf("chat: want 205, got %+v err=%v", it, err)
+	}
+	if err := ch.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 单向
+	if err := srv.SendOneWay(sid, "client.log", item{N: 9}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-gotOneWay:
+		if got.N != 9 {
+			t.Fatalf("oneway: want 9, got %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("oneway handler not called")
+	}
+
+	// 未知会话/未连接：立即报错，不挂起
+	if _, err := srv.Request(ctx, "no-such-session", "client.echo", item{N: 1}); err == nil {
+		t.Fatal("want error for unknown session")
+	}
+}
+
+// TestReconnectAfterServerRestart：服务端整个下线（监听关闭 + 连接被杀），
+// 客户端对拒连端口按退避持续重试；服务端在原地址复活后自动重连成功。
+func TestReconnectAfterServerRestart(t *testing.T) {
+	cfg := shortConfig()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	srv, err := NewServer(ln, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Handle("ping", func(req *Request) (any, error) { return item{N: 1}, nil })
+	go srv.Serve()
+
+	c, err := Dial(context.Background(), addr, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	reconnected := make(chan struct{}, 4)
+	c.OnReconnect(func() { reconnected <- struct{}{} })
+
+	// 服务端下线：连接死亡 → 退避重拨 → 拒连 → backoff 增长到上限
+	_ = srv.Close()
+
+	// 同一地址复活（全新会话存储：旧会话必然 resume 失败）
+	ln2, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv2, err := NewServer(ln2, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv2.Handle("ping", func(req *Request) (any, error) { return item{N: 2}, nil })
+	go srv2.Serve()
+	t.Cleanup(func() { _ = srv2.Close() })
+
+	select {
+	case <-reconnected:
+	case <-time.After(5 * time.Second):
+		c.mu.Lock()
+		epAlive := false
+		if c.ep != nil {
+			select {
+			case <-c.ep.tr.dead:
+			default:
+				epAlive = true
+			}
+		}
+		buf := make([]byte, 1<<16)
+		n := runtime.Stack(buf, true)
+		c.mu.Unlock()
+		t.Fatalf("client did not reconnect after server restart: session=%q epAlive=%v\n%s",
+			c.SessionID(), epAlive, buf[:n])
+	}
+	m, err := c.Request(context.Background(), "ping", nil)
+	if err != nil {
+		t.Fatalf("request after reconnect: %v", err)
+	}
+	var it item
+	if err := m.Decode(&it); err != nil || it.N != 2 {
+		t.Fatalf("want 2 from restarted server, got %+v err=%v", it, err)
 	}
 }

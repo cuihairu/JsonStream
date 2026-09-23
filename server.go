@@ -2,9 +2,12 @@ package jsonstream
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
+	"sort"
 	"sync"
 	"time"
 )
@@ -97,6 +100,78 @@ func (s *Server) Publish(topic string, payload any) error {
 		})
 	}
 	return nil
+}
+
+// ---- 发起侧 API（服务端作为 initiator）：向指定客户端会话主动发起交互，
+// 客户端以 Handle/HandleStream/HandleChannel/HandleOneWay 注册的 handler 应答。
+// Stream ID 由本端按偶数分配（protocol.md §7.3）——端点层方向无关，这里只是门面。
+
+// Sessions 返回当前有活跃连接的会话 ID（升序），可作为下列方法的目标。
+func (s *Server) Sessions() []string {
+	s.mu.Lock()
+	ids := make([]string, 0, len(s.conns))
+	for sc := range s.conns {
+		ids = append(ids, sc.sess.id)
+	}
+	s.mu.Unlock()
+	sort.Strings(ids)
+	return ids
+}
+
+// sessionEp 解析目标会话当前活跃连接的端点。
+func (s *Server) sessionEp(sessionID string) (*endpoint, error) {
+	ss := s.store.take(sessionID)
+	if ss == nil {
+		return nil, fmt.Errorf("jsonstream: unknown session %q", sessionID)
+	}
+	ss.mu.Lock()
+	sc := ss.conn
+	ss.mu.Unlock()
+	if sc == nil {
+		return nil, fmt.Errorf("jsonstream: session %q disconnected", sessionID)
+	}
+	select {
+	case <-sc.ep.tr.dead: // 连接已死、尚未从会话摘除的窗口期，诚实报错
+		return nil, fmt.Errorf("jsonstream: session %q disconnected", sessionID)
+	default:
+	}
+	return sc.ep, nil
+}
+
+// Request 向指定会话发起请求/响应。
+func (s *Server) Request(ctx context.Context, sessionID, route string, payload any) (*Message, error) {
+	ep, err := s.sessionEp(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return ep.doRequest(ctx, route, payload)
+}
+
+// Stream 向指定会话发起流式响应。
+func (s *Server) Stream(ctx context.Context, sessionID, route string, payload any) (*ReadStream, error) {
+	ep, err := s.sessionEp(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return ep.doStream(ctx, route, payload)
+}
+
+// Channel 向指定会话发起双工通道。
+func (s *Server) Channel(ctx context.Context, sessionID, route string, payload any) (*Channel, error) {
+	ep, err := s.sessionEp(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return ep.doChannel(ctx, route, payload)
+}
+
+// SendOneWay 向指定会话单向发送。
+func (s *Server) SendOneWay(sessionID, route string, payload any) error {
+	ep, err := s.sessionEp(sessionID)
+	if err != nil {
+		return err
+	}
+	return ep.doOneWay(route, payload)
 }
 
 // Serve 开始接受连接，阻塞直到 Close。
@@ -194,25 +269,40 @@ func (s *Server) handleConn(nc net.Conn) {
 		return
 	}
 
-	tr := newTransport(nc, br, tx, &connCfg, aj.Credit)
+	// endpoint 与 transport 互引用（tr 挂 ep 的分发回调、ep 持 tr），
+	// 用闭包晚绑定：tr.start 之前两者都已赋值，回调解引用安全。
 	sc := &serverConn{srv: s, sess: sess}
+	var ep *endpoint
+	tr := newTransport(nc, br, tx, &connCfg, aj.Credit,
+		func(f *Frame) error { return ep.handleFrame(f) },
+		sc.onDead)
 	sc.ep = newEndpoint(false, connCfg, tr, s.table)
+	ep = sc.ep
 	sc.ep.onSubscribe = sc.onSubscribe
 	sc.ep.onUnsubscribe = sc.onUnsubscribe
 	sc.ep.downSink = sess.sendDown
 
 	_ = nc.SetDeadline(time.Time{})
-	if err := tr.rawWrite(mustConnack(&aj)); err != nil {
-		return
-	}
-	// 新旧会话都要绑定连接（新会话 retained 为空，绑定只是挂上下行落点）；
-	// resumed 会话在 tr.start 之前重放保留帧：sendCh 有序，重放帧先于实时帧。
-	sess.bind(sc)
-	tr.start(sc.ep.handleFrame, sc.onDead)
-
+	// 先注册、后写 CONNACK：客户端收到 CONNACK 即视为已建立（Dial 返回、
+	// 会话可被 Sessions/发起侧 API 寻址、Close 能 kill 到它），连接登记
+	// （s.conns）与 sess.conn 绑定都必须 happens-before CONNACK 落网，
+	// 否则存在窗口——Close 漏杀该连接（客户端永远收不到断连、handleConn
+	// 悬在 <-tr.dead 上泄漏），或发起侧 API 拿到 sess.conn == nil。
 	s.mu.Lock()
 	s.conns[sc] = struct{}{}
 	s.mu.Unlock()
+	// bind 同时把 resumed 会话的保留帧排入 sendCh：CONNACK 走 rawWrite
+	// 直写 socket，写循环 tr.start 后才排空 sendCh，线上顺序仍为
+	// CONNACK → 重放帧 → 实时帧。
+	sess.bind(sc)
+	if err := tr.rawWrite(mustConnack(&aj)); err != nil {
+		s.mu.Lock()
+		delete(s.conns, sc)
+		s.mu.Unlock()
+		return
+	}
+	tr.start()
+
 	<-tr.dead
 	s.mu.Lock()
 	delete(s.conns, sc)
