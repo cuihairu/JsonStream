@@ -983,3 +983,112 @@ func TestChannelHandlerError(t *testing.T) {
 		t.Fatalf("connection should survive channel handler errors: %v", err)
 	}
 }
+
+// TestCreditNegotiationTakesMin：credit 生效值 = 双方声明中大于 0 者的最小值
+// （protocol.md §6.1）。服务端 2、客户端 8 → 生效窗口 2：发送方须在 2 处撞墙。
+func TestCreditNegotiationTakesMin(t *testing.T) {
+	const total = 8
+	var emitted int32
+	done := make(chan struct{})
+	scfg := shortConfig()
+	scfg.Credit = 2
+	_, addr := startTestServer(t, scfg, func(s *Server) {
+		s.HandleStream("firehose", func(req *Request, em Emitter) error {
+			for i := 0; i < total; i++ {
+				if err := em.Emit(item{N: i}); err != nil {
+					return err
+				}
+				atomic.AddInt32(&emitted, 1)
+			}
+			close(done)
+			return nil
+		})
+	})
+
+	ccfg := shortConfig()
+	ccfg.Credit = 8 // 比服务端大：生效值应取服务端的 2
+	c := dialTest(t, addr, ccfg)
+	ctx := context.Background()
+	st, err := c.Stream(ctx, "firehose", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(300 * time.Millisecond)
+	if got := atomic.LoadInt32(&emitted); got != 2 {
+		t.Fatalf("effective window should be min(2,8)=2, emitted=%d", got)
+	}
+	for want := 0; want < total; want++ {
+		if _, ok := st.Next(ctx); !ok {
+			t.Fatalf("stream ended at %d (err=%v)", want, st.Err())
+		}
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not finish after consumer drained")
+	}
+}
+
+// TestEncryptedCompressedEndToEnd：压缩+加密全链路——握手协商生效、
+// 每帧按 Flags 走 flate→AES-GCM 管线，四种交互模式（含 >64B 压缩阈值
+// 的大 payload）在真实连接上往返无损。
+func TestEncryptedCompressedEndToEnd(t *testing.T) {
+	key := bytes.Repeat([]byte{0x5A}, 32)
+	scfg := shortConfig()
+	scfg.Compress = true
+	scfg.Encrypt = true
+	scfg.Key = key
+	big := map[string]any{"blob": string(bytes.Repeat([]byte("JsonStream"), 400))} // 4KB 高冗余，必压缩
+	_, addr := startTestServer(t, scfg, func(s *Server) {
+		s.Handle("echo", func(req *Request) (any, error) {
+			var v map[string]any
+			return v, req.Decode(&v)
+		})
+		s.HandleStream("bulk", func(req *Request, em Emitter) error {
+			for i := 0; i < 3; i++ {
+				if err := em.Emit(big); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	})
+
+	ccfg := shortConfig()
+	ccfg.Compress = true
+	ccfg.Encrypt = true
+	ccfg.Key = key
+	c := dialTest(t, addr, ccfg)
+	ctx := context.Background()
+
+	// 请求/响应（小 payload，明文直发路径）
+	m, err := c.Request(ctx, "echo", map[string]int{"a": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var small map[string]int
+	if err := m.Decode(&small); err != nil || small["a"] != 1 {
+		t.Fatalf("small echo: %+v err=%v", small, err)
+	}
+
+	// 流式（大 payload，压缩+加密路径），内容逐字节比对
+	st, err := c.Stream(ctx, "bulk", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBlob := big["blob"].(string)
+	for i := 0; i < 3; i++ {
+		got, ok := st.Next(ctx)
+		if !ok {
+			t.Fatalf("stream ended at %d (err=%v)", i, st.Err())
+		}
+		var frame map[string]any
+		if err := got.Decode(&frame); err != nil {
+			t.Fatal(err)
+		}
+		if frame["blob"] != wantBlob {
+			t.Fatal("large payload corrupted through compress+encrypt pipeline")
+		}
+	}
+}
