@@ -907,8 +907,11 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 	reconnected := make(chan struct{}, 4)
 	c.OnReconnect(func() { reconnected <- struct{}{} })
 
-	// 服务端下线：连接死亡 → 退避重拨 → 拒连 → backoff 增长到上限
+	// 服务端下线：连接死亡 → 退避重拨 → 拒连 → backoff 增长到上限。
+	// 端口故意空窗 200ms：若立刻复活，客户端首次重拨总能赶上新服务端，
+	// 拒连分支（nextBackoff 的增长与 BackoffMax 钳制）永远不会被执行。
 	_ = srv.Close()
+	time.Sleep(200 * time.Millisecond)
 
 	// 同一地址复活（全新会话存储：旧会话必然 resume 失败）
 	ln2, err := net.Listen("tcp", addr)
@@ -981,6 +984,55 @@ func TestChannelHandlerError(t *testing.T) {
 	}
 	if _, err := c.Request(ctx, "ping", nil); err != nil {
 		t.Fatalf("connection should survive channel handler errors: %v", err)
+	}
+}
+
+// TestChannelCancel：Cancel 立即终结整条双工流——对端阻塞中的 Receive 以
+// CANCELLED 失败，本端后续 Send/Receive 同样立即失败而非挂起（§7.4 半关闭
+// 由 Close 承担，Cancel 是无差别终结）。
+func TestChannelCancel(t *testing.T) {
+	srvFailed := make(chan error, 1)
+	srv, addr := startTestServer(t, shortConfig(), func(s *Server) {
+		s.HandleChannel("cancel-chat", func(ch *Channel) error {
+			_, err := ch.Receive(context.Background()) // 阻塞，直到对端 Cancel
+			srvFailed <- err
+			return nil
+		})
+		s.Handle("ping", func(req *Request) (any, error) { return item{N: 1}, nil })
+	})
+	_ = srv
+	c := dialTest(t, addr, shortConfig())
+	ctx := context.Background()
+
+	ch, err := c.Channel(ctx, "cancel-chat", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 留出时间让服务端 handler 停进 Receive 的阻塞读，再立即终结
+	time.Sleep(50 * time.Millisecond)
+	if err := ch.Cancel(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-srvFailed:
+		var je *Error
+		if !errors.As(err, &je) || je.Code != CodeCancelled {
+			t.Fatalf("server Receive after client Cancel: want CANCELLED, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server Receive not failed after client Cancel")
+	}
+	// 本端流已终结：后续收发立即失败
+	if err := ch.Send(item{N: 2}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("client Send after Cancel: want ErrClosed, got %v", err)
+	}
+	if _, err := ch.Receive(ctx); err == nil {
+		t.Fatal("client Receive after Cancel should fail")
+	}
+	// Cancel 只终结这条流，连接仍存活
+	if _, err := c.Request(ctx, "ping", nil); err != nil {
+		t.Fatalf("connection should survive channel cancel: %v", err)
 	}
 }
 
