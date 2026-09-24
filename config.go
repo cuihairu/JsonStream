@@ -122,7 +122,9 @@ func (c *Config) reconnectEnabled() bool { return c.Reconnect == nil || *c.Recon
 // discardLogger 是 Logger 缺省实现：静默。
 type discardLogger struct{}
 
-func (discardLogger) Printf(string, ...any) {}
+func (discardLogger) Printf(string, ...any) {
+	var _ struct{} // no-op：空函数体在 go tool cover -func 里恒显 0.0%
+}
 
 func (c *Config) logger() Logger {
 	if c.Logger != nil {

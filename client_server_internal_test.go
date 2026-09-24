@@ -487,6 +487,65 @@ func TestClientCloseDuringRetryBackoff(t *testing.T) {
 	c.Close()
 }
 
+// TestClientCloseDuringHandshakeRetryBackoff：重试路径的第三条退避——
+// TCP 拨通但握手失败（对端收下 CONNECT 后断开，establish 等不到 CONNACK）
+// 后的退避同样可被 Close 打断。首连正常建立（established=true）后才转入
+// 握手必败模式，否则 Dial 的首连快速失败语义会先退出循环。
+func TestClientCloseDuringHandshakeRetryBackoff(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	handshakeBroken := make(chan struct{})
+	go func() {
+		// 第一次连接：正常握手；此后的连接：收 CONNECT 即断——establish
+		// 等 CONNACK 读到 EOF，必然失败。
+		cn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		br := bufio.NewReader(cn)
+		f, err := ReadFrame(br)
+		if err == nil && f.Type == TypeConnect {
+			aj, _ := connackFrame(&connackJSON{SessionID: "b3"})
+			_ = writeOnce(cn, aj)
+			time.Sleep(50 * time.Millisecond)
+		}
+		_ = cn.Close()
+		for {
+			cn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			br := bufio.NewReader(cn)
+			if f, err := ReadFrame(br); err == nil && f.Type == TypeConnect {
+				_ = cn.Close()
+				select {
+				case handshakeBroken <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
+
+	cfg := shortConfig()
+	cfg.BackoffInitial = 2 * time.Second
+	cfg.BackoffMax = 2 * time.Second
+	c, err := Dial(context.Background(), ln.Addr().String(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	if got := c.SessionID(); got != "b3" {
+		t.Fatalf("session = %q, want b3", got)
+	}
+
+	<-handshakeBroken
+	time.Sleep(300 * time.Millisecond) // 退避抖动 [1s,2s]，Close 必然落在窗口内
+	c.Close()
+}
+
 // 关闭自动重连后连接消亡：connectLoop 静默退出，不再重拨。
 func TestClientReconnectDisabledExitsQuietly(t *testing.T) {
 	addr := startRawListener(t, func(c net.Conn) {
