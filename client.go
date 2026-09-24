@@ -496,4 +496,4 @@ func (c *Client) logf(format string, v ...any) {
 
 // randFloat 供退避抖动使用。抖动防的是重连惊群，无需密码学随机性
 // （gosec G404 在此为误报）：可预测的抖动时刻对攻击者没有收益。
-func randFloat() float64 { return rand.Float64() }
+func randFloat() float64 { return rand.Float64() } //#nosec G404 -- 退避抖动，声明式排除使裸跑 gosec 零告警
