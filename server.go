@@ -364,6 +364,17 @@ func (sc *serverConn) onUnsubscribe(id uint32) {
 
 func (sc *serverConn) onDead(err error) {
 	sc.sess.unbind(sc)
+	// 服务端发起的流（偶数 ID）随连接消亡：挂起的 srv.Request/Stream/
+	// Channel 立即失败，而不是悬挂到应用 ctx（Background 则永久挂）。
+	// 语义依据：这类流的响应是客户端→服务端的上行，§8.1 明确上行不缓存
+	// ——断连后响应必然丢失，等待没有意义。客户端发起的流（奇数）是
+	// responder 流，归会话保留（迁移/终结），此处不得触碰。
+	closed := &Error{Code: CodeInternal, Message: ErrClosed.Error()}
+	for id, flw := range sc.ep.snapshot() {
+		if id%2 == 0 && !flw.isDone() {
+			flw.fail(closed)
+		}
+	}
 	if err != nil && !errors.Is(err, ErrClosed) {
 		sc.srv.cfg.logger().Printf("jsonstream: server: connection lost (session %s): %v", sc.sess.id, err)
 	}

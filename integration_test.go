@@ -672,6 +672,62 @@ func TestSessionDropCancelsHandlers(t *testing.T) {
 	}
 }
 
+// TestServerInitiatedRequestFailsOnDisconnect：服务端发起的请求在连接
+// 死亡后立即失败，而不是悬挂到应用 ctx（Background 则永久挂）。语义依据：
+// 这类流的响应是客户端→服务端的上行（§8.1 上行不缓存），断连后响应必然
+// 丢失——「随旧连接消亡」必须是即时失败，等待没有意义。
+func TestServerInitiatedRequestFailsOnDisconnect(t *testing.T) {
+	var srv *Server
+	_, addr := startTestServer(t, shortConfig(), func(s *Server) { srv = s })
+
+	handlerStarted := make(chan struct{})
+	release := make(chan struct{})
+	cfg := shortConfig()
+	c := dialTest(t, addr, cfg)
+	c.Handle("slow", func(_ *Request) (any, error) {
+		handlerStarted <- struct{}{}
+		<-release
+		return item{N: 1}, nil
+	})
+	waitFor(t, "client session registered", func() bool { return len(srv.Sessions()) == 1 })
+	sid := c.SessionID()
+
+	// 挂起的发起侧请求：handler 已开始执行、响应未发出。
+	type reqResult struct {
+		m   *Message
+		err error
+	}
+	reqCh := make(chan reqResult, 1)
+	go func() {
+		m, err := srv.Request(context.Background(), sid, "slow", nil)
+		reqCh <- reqResult{m, err}
+	}()
+	select {
+	case <-handlerStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("client handler not invoked")
+	}
+
+	// 连接死亡：挂起的请求必须以连接关闭错误收尾。
+	c.mu.Lock()
+	tr := c.ep.tr
+	c.mu.Unlock()
+	tr.kill(errors.New("simulated network failure"))
+	select {
+	case r := <-reqCh:
+		if r.err == nil {
+			t.Fatal("server-initiated request succeeded after disconnect, want error")
+		}
+		var je *Error
+		if !errors.As(r.err, &je) || je.Code != CodeInternal {
+			t.Fatalf("request err = %v, want INTERNAL(connection closed)", r.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server-initiated request hung after disconnect")
+	}
+	close(release)
+}
+
 // TestResumeExpiredFailsPendingAndResubscribes：会话恢复失败（服务端禁用
 // 保留）时：挂起请求以 SESSION_EXPIRED 失败、OnResumeFailed 触发、订阅自动
 // 重订后广播继续可达。
