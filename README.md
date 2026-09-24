@@ -1,50 +1,39 @@
 # JsonStream
 
-一道面试题
+一道面试题的实现：基于 TCP 的自定义 JSON 二进制帧协议，参考 WebSocket 与 RSocket。纯标准库、零第三方依赖，Go ≥ 1.24。协议规范见 [docs/protocol.md](docs/protocol.md)，更细的权衡笔记见 [docs/design-notes.md](docs/design-notes.md)。
 
-设计一个自定义的协议：
+## 面试题要求
 
-## 传输可靠性与容错性
+题目原文的分组与条目，原样整理：
 
-- 基于TCP  
-- 支持 断线重连恢复
-- 支持 心跳机制
+- **传输可靠性与容错性**
+  - 基于 TCP
+  - 支持断线重连恢复
+  - 支持心跳机制
+- **便捷性**
+  - 以 JSON 为交互数据
+- **高性能**
+  - 二进制帧
+  - 支持参数化是否启用压缩
+- **安全性**
+  - 支持可选是否启用加密
+- **灵活性**
+  - 支持请求/响应模式
+  - 支持发布/订阅模式
+  - 支持流式传输
+  - 支持双工
+  - 支持单向发送，无需返回
+  - 支持返回错误
+  - 支持可选背压
+- **工程要求**
+  - 对应的测试用例
+  - 性能测试
+  - 完整的使用例子
+  - 相关说明文档
 
-## 便捷性
+## 设计与知识点
 
-- 以Json为交互数据
-
-## 高性能
-
-- 二进制帧
-- 支持 参数化是否启用压缩
-
-## 安全性
-
-- 支持 可以选是否启用加密
-
-## 灵活性
-
-- 支持 请求/响应模式
-- 支持 发布/订阅模式
-- 支持 流式传输
-- 支持 双工
-- 支持 单向发送，无需返回
-- 支持 返回错误
-- 支持 可选背压
-
-## 工程要求
-
-- 对应的测试用例
-- 性能测试
-- 完整的使用例子
-- 相关说明文档
-
-# 设计
-
-设计参考了Websocket和Rsocket
-
-## 协议帧
+### 帧格式：定长头 + 长度前缀，对着 WebSocket 抄作业再还回去一点
 
 ```
  0               8               16              24              32
@@ -61,111 +50,166 @@
  +---------------------------------------------------------------+
 ```
 
-- 定长 14B 头 + 大端序，长度前缀分帧（对比 WebSocket 的 2/8 字节变长长度：不做分片，一条流的多帧语义由 Stream ID 与帧类型承担）。
-- `Type` 区分 CONNECT/CONNACK/PING/PONG/REQUEST/RESPONSE/COMPLETE/CANCEL/ONEWAY/ERROR/SUBSCRIBE/SUBACK/UNSUBSCRIBE/PUBLISH/CREDIT。
-- `Flags` 位：压缩 / 加密 / HasMeta / 流式 / 双工；保留位必须为 0。
-- 单帧上限：Payload 16MiB、Metadata 64KiB。
+这里考察的是**二进制协议设计的基本功：TCP 粘包怎么破、字节序、变长还是定长**。TCP 是字节流没有消息边界，分帧手段无非三种：定长、分隔符、长度前缀。JSON 里有分隔符歧义，文本帧不可靠；我在 14B 定长头里放 32 位大端长度前缀，解码端「读完头 → 两次 `ReadFull`」成为无条件操作。
 
-## 心跳
+对 WebSocket（RFC 6455 §5.2）我做了三个减法，每个都有明确理由：
 
-双方各自按协商间隔发送 PING（对端回 PONG）；读空闲超过 **1.5×间隔** 判定对端失联并断开。
+- **不做 FIN 分片**。分片重组状态机是为浏览器流式解析大文件设计的；JSON 业务消息在 16 MiB 单帧上限内装得下，省掉一个状态机。
+- **不做客户端掩码**。MASK 防的是代理缓存投毒这个历史包袱，专用客户端/服务端直连场景没有这个威胁模型。
+- **不做 7/16/64 位变长长度**。变长编码多数帧省 2~6 字节，换来解码端的分支状态机；固定 4B 的 16 MiB 上限同时是内存防线（对端报多大的长度，就预分配多大的缓冲，上限即闸门）。
 
-## 断线重连恢复
+净效果是帧头 14B，比 WebSocket 的 2~6B 厚。每帧多花的约 10B 对数百字节起的 JSON 消息是 <3% 的税；对心跳小帧是实打实的浪费，所以心跳帧不带 Metadata、payload 为空，14B 就是下限，我接受。
 
-- 客户端自动重连（指数退避+抖动），CONNECT 携带 `session_id`；服务端在保留期内（默认 30s）保留订阅关系与断开期间产生的下行帧，重连时以 `CONNACK{resumed=true}` 确认并重放（at-least-once）。
-- 同会话的新连接顶替旧连接（takeover）；保留超期/禁用/队列超限则 `resumed=false`，挂起流以 `SESSION_EXPIRED` 失败、订阅自动重订、`OnResumeFailed` 回调。
+比 RSocket 的 6~10B 帧头多出的 8B 是 Magic 和 Version：RSocket 跑在 Reactor Netty 之上，传输层已替它做了连接识别；我直接裸奔 TCP，Magic 给误连/端口探测一个立即判废的机会，Version 给握手期快速失败的依据——这两个字节是我自付的保险费。Flags 的保留位必须为 0，解码端见到非零保留位直接按 Malformed 断开，给未来升级留语义清晰的门。
 
-## 压缩与加密（参数化）
+### 交互模型：RSocket 四原语，Stream ID 多路复用
 
-- 握手协商生效（双方都开启才启用）：Payload ≥64B 走 flate；启用加密时 AES-256-GCM（32B PSK），**先压缩后加密**。握手帧恒为明文。
+考察点是从 HTTP/1.1 的「一请求一连接」到 HTTP/2 的「一连接多流」这个跃迁。一条 TCP 连接上并发跑请求/响应、无限流、双工通道、订阅，归属怎么定——答案是**每帧必带 Stream ID，控制帧除外，一切皆流**：请求/响应是生命周期极短的流，订阅是以 SUBACK 为起点长流。不存在「广播帧」这种无主帧。
 
-## 背压（可选）
+四种交互原语照 RSocket 的划分：`REQUEST→RESPONSE`（一问一答）、`REQUEST+Flags.Stream→N×RESPONSE+COMPLETE`（流式）、`ONEWAY`（单向，连错误都不回）、`REQUEST+Flags.Channel`（双向多帧）。两个我认为值得写的细节：
 
-连接级信用窗口（默认关闭；开启时取双方协商的最小值）：发送方发数据帧前取令牌，额度耗尽阻塞；接收方交付应用后归还，攒到半窗批量回授 `CREDIT` 帧。
+- **响应帧自带终结语义**：请求/响应不追加 COMPLETE 帧，一次交互少一个往返的帧和一次状态转换。这是 RSocket 比「gRPC 流必须显式 end」更适合小消息的地方。
+- **CANCEL 是流的一部分**：背压解决「生产快于消费」，CANCEL 解决「消费者根本不要了」。HTTP/1.1 没有对应物，只能断连接。
 
-# 快速开始
+我和 RSocket 的分歧在一个点：它把三种请求拆成三个帧类型，我用一个 `REQUEST` 类型加 Flags.Stream/Flags.Channel 位表达。理由是类型表还要装 SUBSCRIBE/PUBLISH、心跳、恢复这些控制帧，解析分支数希望克制；代价也要诚实——收到帧那一刻不能预判交互模式，要等 Metadata 里的路由查到 handler 注册类型才能校验，对「按模式做准入」的网关不够友好，中间件只看帧头无法区分一次性请求和无限流。v1 用「Flags 声明与 handler 不一致回 ERROR(PROTOCOL)」兜底，真出现该场景，升级路径是把这两个位提为独立帧类型，语义完全等价。
+
+Stream ID 按发起方分奇偶（客户端奇数、服务端偶数），和 HTTP/2 同思路：不用等待协商就知道新到的流 ID 是谁发起的，两端各自单调递增互不冲突。
+
+### Metadata 与 Payload 分离：路由可读，业务不透明
+
+`route`/`topic` 放在帧头的 Metadata 段而不是 JSON payload 里，模仿 RSocket 的 composite metadata。考察点是**协议对中间件的友好性**：鉴权、限流、metrics、网关路由不解码 payload 就能工作。
+
+反面后果想清楚过：如果路由混进 payload，加密后它就是不透明字节，中间件想路由就必须持有密钥——等于强迫每一跳都拿到端到端秘钥，加密的意义就没了。代价是 Metadata 恒为明文，「哪条连接在订阅哪个主题」可以被链路旁路统计；需要隐藏时把路由名纳入加密范围就要放弃中间件可读性，二选一，没有免费午餐。
+
+### 心跳：为什么不用 TCP keepalive
+
+应用层 PING/PONG、读空闲超过 1.5× 间隔判死。考察点是**连接健康和进程健康是两回事**：TCP keepalive 探测的是对端内核协议栈还活着，探不出对端进程死锁、事件循环卡住、GC 停顿——应用层心跳测的才是「对端应用还能处理这条连接」。1.5× 而不是 1× 是容忍一次丢帧抖动，2× 则判死太慢。心跳是双向各自独立发的，两端配置通过 CONNACK 协商一致。
+
+### 断线恢复：会话保留 + 重放，以及诚实的边界
+
+考察点是**可靠传输的状态机设计**：断线重连恢复不是「自动重连」四个字，是「断开期间的状态谁替你记着、记多久、怎么续」。
+
+我的设计：客户端自动重连（指数退避加抖动），CONNECT 携带 `session_id`；服务端在保留期内（默认 30s、每会话 4 MiB 上限）保留订阅关系和断开期间产生的下行帧，重连以 `CONNACK{resumed=true}` 确认并重放（at-least-once）；同会话新连接顶替旧连接（takeover），防止半死连接复活打架；保留超期则 `resumed=false`，挂起流以 `SESSION_EXPIRED` 失败、订阅自动重订、`OnResumeFailed` 回调交给应用重建状态。
+
+这套设计的边界我在文档里写死了，因为它们不是实现瑕疵，是 v1 的主动取舍：
+
+- **重放只覆盖进入保留队列的下行帧**，断连瞬间 TCP 在途的帧不保证送达也不重放——恢复窗口内「可能丢最后一帧」，且无 per-frame 序号，客户端无法判重，非幂等操作（下单、扣款）要靠业务 ID 幂等兜底。要做精确一次就得给每帧配序号加 ACK，那是另一层复杂度，题面没要求。
+- **上行不缓存**：断连瞬间客户端发出的请求会丢，「重连成功但刚才那个请求发出去过没有」是未定义状态。把难题诚实下放，也比假装解决了强。
+
+### 压缩与加密：帧内自描述，先压后加不可逆
+
+考察点是**参数化设计**和对称加密的正确用法。三个决策：
+
+- **每帧的 Flags 如实标注本帧是否压缩/加密，解码管线只看帧不看协商结果**。这样心跳帧永远裸奔、大 payload 才压缩，单连接内混合存在；CONNACK 协商只决定默认值而不是枷锁。反过来「协商定了就只能怎样」会让小帧白付税、大帧错过收益。
+- **顺序必须先压缩后加密**。GCM 输出在统计上近似随机字节，对密文压缩得率为零；先加后压等于白付 28B 开销（12B nonce + 16B tag）还保留着明文可压缩的冗余。这个顺序错了性能直接不可用，而且错误顺序不报错——只能靠设计冻结。
+- **加密用 AES-256-GCM + 32B PSK，握手帧恒为明文**（握手帧加密就鸡生蛋了）。要诚实说：PSK 不解决密钥分发，题面要的是「可选加密」的参数化，不是「替代 TLS」；生产上外层套 TLS，Flags.Encrypted 留给「经过中间件仍要保密」的端到端场景。
+
+压缩策略 v1 是全有或全无（Config 决定，载荷 ≥64B 才实际压），没做「压缩率不达标回退明文」的自适应——那需要每帧压两次或边压边判断，复杂度收益不成比例。
+
+### 背压：credit 而不是 LEASE，以及它为什么必须是可选的
+
+三种流控模型的对照，考察点是**流控到底在约束什么**：
+
+| 模型 | 代表 | 语义 | 复杂度 |
+| --- | --- | --- | --- |
+| 滑动窗口 | TCP / HTTP/2 | 按字节授权 | 高（字节级记账） |
+| credit 按条数 | 本协议、Reactive Streams `request(n)` | 授权 N 条，交付后归还 | 中 |
+| 租约按时间 | RSocket `LEASE` | 约束速率不约束在途量 | 低 |
+
+题面要的背压是「生产快于消费时把压力传回去」，credit 直接表达「我还没消费完，你别再发」；LEASE 防的是滥用不是背压（RSocket 自己也靠订阅方 request(n) 做真流控）；滑动窗口按字节记账对 JSON 消息过度工程，按条计数恰好是业务方心智单位。
+
+我把 credit 做成默认关闭的可选项，因为它**不是免费能力**：额度归零时 `Emit()` 必须阻塞，是全协议唯一反向影响应用并发模型的机制；归还时机即语义（收到帧≠归还，交付应用才算，早了背压失效、晚了吞吐骤降）；双工模式下双方互等对方 credit 有死锁风险；连接级窗口一个慢订阅拖住同连接所有流（队头阻塞的流控版）。这些坑每个都要工程决策，不该默认强加给所有用户。请求/响应和 ONEWAY 我明确不纳入 credit——单帧即终结的交互没有「连续生产」可言，硬套只白加一个 RTT。
+
+### pub/sub 与 req/res 混用一条连接：边界划在流上
+
+两种模式共享连接、共享帧头，边界不清就会出「这帧属于谁」的歧义。考察点是**协议语义的正交性**。我的划分：主题是双向命名空间，方向由生产方决定——C→S 的 PUBLISH 打服务端注册的 handler，S→C 的 PUBLISH 投递给订阅，同一帧类型两个方向语义对偶，避免「上行主题/下行主题」两套类型。错误边界不对称是刻意的：订阅建立失败回 ERROR，投递失败（订阅方回调出错）不回帧——回帧就成了「响应的响应」，方向倒置。这条不对称必须写进文档，否则实现者必然在这里犹豫。
+
+混用的收益是一条 TCP、一次握手、一套心跳与恢复；代价是共享流控与队头阻塞。我在文档里把两边都挑明了，不粉饰。
+
+### 测试里抓到的真 bug：不这么设计的后果实证
+
+「为什么这么设计」最有说服力的部分，是我实测后自己踩到又修掉的 9 个真缺陷——每一个都是一条设计教训：
+
+1. **解压炸弹**（fuzz 抓到）：解压结果不设上限，单帧 16 MiB 的 flate 数据能膨胀三个数量级——不防等于把 OOM 开关交给对端。
+2. **编码不自洽**（fuzz 抓到）：Flags 声明带 Metadata 但内容为空时跳过 metaLen 段，解析-编码不再是互逆——序列化必须满足 round-trip 恒等。
+3. **credit 破坏 at-least-once**：断连后取额度立即失败，handler 误判退出、保留队列变空，重放丢了——连接级流控泄漏进了会话级恢复语义，修复为失败改道保留队列。
+4. **死连接上的 select 双就绪**：发送通道有空位时 `select` 随机选中已死分支，帧静默丢失——Go 的 select 随机性在错误路径上是真陷阱。
+5. **Stream ID 撞号**：重连后 ID 计数器归零，新流与迁移流同 ID，旧流迟到的 COMPLETE 误杀新流——多路复用加恢复，ID 必须跨重连单调。
+6. **陈旧连接引用**：订阅句柄持有创建时的 endpoint，重连后退订帧发给死连接被静默吞——出站一律取当前 endpoint，让编译器消灭陈旧引用。
+7. **responder 流不迁移**：服务端被动流的 handler 在重连后悬空白产帧，能把保留队列撑爆——会话迁移必须连 handler 一起搬。
+8. **断连后悬挂**：服务端主动发起的交互在连接死亡后永久挂起等待一个必然不会来的响应——响应是上行、不缓存，等待无意义，断连即败。
+9. **元数据上限 off-by-one**（gosec 抓到）：上限写成 64 KiB 整，但长度字段是 uint16——恰 64 KiB 会静默截断成 0 编出错乱帧。上界必须等于字段可表达的值，不是顺手的整数。
+
+## 实现与测试结果
+
+### 关键实现要点
+
+- **纯标准库、零第三方依赖**，核心十来个文件：帧编解码（frame.go）、变换管线（压缩/加密，transform.go）、传输与流控（transport.go、credit.go）、流与会话（flow.go、endpoint.go、client.go、server.go）。
+- 客户端与服务端共用同一套 endpoint 抽象：交互模式、流状态机、流控只写一遍，两侧只差 ID 奇偶与握手方向。出站帧统一经当前 endpoint，杜绝重连后的陈旧引用。
+- 压缩路径按帧复用 flate 编解码器（`sync.Pool` + `Reset`）：按帧新建 writer 的实测代价 ~1.3ms / ~800KB 垃圾每帧，池化后压缩往返 4.1 倍提速、分配降 162 倍。
+- 测试上唯一「为测试而设」的是五个包级接缝（marshal/aes/gcm/rand/超时），其余覆盖率全靠并发时序构造，不动生产逻辑。
+
+### 测试与质量结果
+
+- 语句覆盖率 **100%**（1158/1158，`go test -coverprofile` 实测），48 个测试函数，含契约、集成、并发与 fuzz 靶。
+- `-race -count=3` 全绿；goroutine 泄漏守卫（20 并发客户端回归基线 ±2）。
+- 三条 fuzz 靶（帧解析/变换层/握手状态机）长跑累计千万级 execs 零 crash，实锤修复 2 个真 bug（上文 1、2）。
+- 六件静态检查零告警：staticcheck、vet、gofmt、revive、gosec、gocritic；govulncheck 零可触达漏洞；nilness 零告警。
+- 五平台交叉编译通过（windows/darwin × amd64/arm64、linux/arm64，CGO 关）；go.mod 声明的 go 1.24 经真实工具链实测可构建。
+
+性能（`go test -bench . -benchtime 2s`，i9-10880H / Go 1.24，量级参考）：
+
+| 基准 | 结果 |
+|---|---|
+| 帧编解码往返 64B / 1KiB / 64KiB | ~1.1µs / ~1.1µs / ~67µs |
+| 变换管线（1.4KiB JSON） | 明文 ~15ns；AES-GCM ~5µs；flate ~60µs |
+| 请求/响应 RTT（本机回环） | ~0.1ms |
+
+### 验证方式
+
+以下命令可直接复制执行（Go ≥ 1.24，无第三方依赖）：
 
 ```bash
-# 运行测试与基准（无第三方依赖，Go ≥ 1.24；语句覆盖率 100%，
-# go test -cover 实测，测试策略见 docs/design-notes.md §9）
+git clone https://github.com/cuihairu/JsonStream.git
+cd JsonStream
+
+# 构建 + 全量测试 + 静态检查
+go build ./...
 go test ./...
 go vet ./...
+
+# 覆盖率（应输出 coverage: 100.0% of statements）
 go test -cover ./...
+
+# 性能基准
 go test -bench . -benchtime 2s
 
-# fuzz 信任边界（帧解析 / 变换层 / 握手状态机），已实锤并修复过 2 个真 bug
-# 注意 -fuzz 只接受单个包，./... 会报错
+# fuzz 单靶（注意 -fuzz 只接受单个包，./... 会报错）
 go test -run '^$' -fuzz FuzzReadFrame -fuzztime 30s .
 
-# 示例：终端 1 启动服务端
+# 端到端示例：终端 1 启动服务端
 go run ./examples/server
-
-# 终端 2 运行客户端（请求/响应 + 流式取消 + 单向 + 发布/订阅 + 服务端主动发起）
+# 终端 2 运行客户端（请求/响应、流式取消、单向、发布/订阅、服务端主动发起）
 go run ./examples/client
 ```
 
-客户端 API 一览：
+客户端最小用法（完整 API 见 examples）：
 
 ```go
 c, _ := jsonstream.Dial(ctx, addr, jsonstream.DefaultConfig())
 m, _ := c.Request(ctx, "math.add", map[string]int{"a": 2, "b": 40}) // 请求/响应
 s, _ := c.Stream(ctx, "range", map[string]int{"n": 100})           // 流式
 defer s.Cancel()
-ch, _ := c.Channel(ctx, "chat", nil)                               // 双工
-_ = ch.Send(v); msg, _ := ch.Receive(ctx); _ = ch.Close()          //   Close=半关闭
-_ = c.SendOneWay("notify", v)                                      // 单向
-sub, _ := c.Subscribe(ctx, "ticks", func(m *jsonstream.Message) error { ... })
-_ = c.Publish("metrics", v)                                        // client → server
+sub, _ := c.Subscribe(ctx, "ticks", func(m *jsonstream.Message) error { return nil })
+_ = c.Publish("metrics", v) // client → server
 ```
 
-参数化配置（压缩/加密/背压/重连默认关闭，握手协商后生效）：
+压缩/加密/背压都是参数化开关，握手协商后生效（双方都开才启用）：
 
 ```go
 cfg := jsonstream.DefaultConfig()
-cfg.Heartbeat = 15 * time.Second   // 心跳间隔（静默对端超时翻倍判死）
-cfg.Compress = true                // ≥64B 载荷走 flate；双方都开启才生效
-cfg.Encrypt = true                 // AES-256-GCM，先压缩后加密
-cfg.Key = key32                    // 32 字节预共享密钥
-cfg.Credit = 64                    // 连接级信用窗口；生效值取双方最小
-b := false
-cfg.Reconnect = &b                 // 关闭断线自动重连（默认开）
-c, _ := jsonstream.Dial(ctx, addr, cfg)
+cfg.Compress = true // ≥64B 载荷走 flate
+cfg.Encrypt = true  // AES-256-GCM，先压后加
+cfg.Key = key32     // 32 字节预共享密钥
+cfg.Credit = 64     // 连接级信用窗口，生效值取双方最小
 ```
-
-服务端 API 一览（`Handle*` 应答客户端发起；`Sessions` + 带 `sessionID` 的方法反向发起，Stream ID 按偶数分配）：
-
-```go
-srv, _ := jsonstream.NewServer(ln, jsonstream.DefaultConfig())
-srv.Handle("math.add", func(req *jsonstream.Request) (any, error) { ... })
-srv.HandleStream("range", func(req *jsonstream.Request, em jsonstream.Emitter) error { ... })
-srv.HandleChannel("chat", func(ch *jsonstream.Channel) error { ... })
-srv.HandleOneWay("notify", func(m *jsonstream.Message) error { ... })
-srv.HandlePublish("metrics", func(m *jsonstream.Message) error { ... })
-srv.OnAuth(func(cj *jsonstream.ConnectJSON) error { return nil }) // 鉴权钩子（读能力声明与凭证）
-go srv.Serve()
-
-// 向指定会话主动发起
-for _, id := range srv.Sessions() {
-    m, _ := srv.Request(ctx, id, "ping", nil)
-    _, _ = srv.Stream(ctx, id, "time", nil)
-    _, _, _ = m, id, ctx
-}
-```
-
-# 性能
-
-`go test -bench . -benchtime 2s -count=3`，i9-10880H / Go 1.24（量级参考，绝对值受机器影响）：
-
-| 基准 | 结果 |
-|---|---|
-| 帧编解码往返 64B / 1KiB / 64KiB | ~1.1µs（~95MB/s）/ ~1.1µs（~985MB/s）/ ~67µs（~985MB/s） |
-| 变换管线（1.4KiB JSON，含往返） | 明文 ~15ns；AES-GCM ~5µs；flate ~60µs；flate+GCM ~52µs |
-| 请求/响应 RTT（本机回环） | ~0.1ms |
-
-压缩路径按帧复用 flate 编解码器（`sync.Pool` + `Reset`）：按帧新建 writer 的实测代价是 ~1.3ms / ~800KB 垃圾每帧，池化后压缩往返 4.1 倍提速、分配降 162 倍。GCM 先压缩后加密（只处理压缩后字节），吞吐受本机无 AES-NI 限制，支持 AES-NI 的硬件上接近线速。
-
-# 文档
-
-- [docs/protocol.md](docs/protocol.md) — 协议规范 v1：帧格式、握手、心跳、流状态机、各交互模式的帧语义、会话恢复、错误码、扩展点
-- [docs/design-notes.md](docs/design-notes.md) — 设计权衡：为什么这么设计、WebSocket/RSocket 惯例对比、优缺点（帧头开销、压缩加密取舍、背压复杂度、pub/sub 与 req/res 混用的边界）
-
