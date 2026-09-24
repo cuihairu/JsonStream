@@ -219,7 +219,7 @@ func TestClientHandshakeWriteTimeout(t *testing.T) {
 	addr := startRawListener(t, func(net.Conn) { time.Sleep(5 * time.Second) })
 	cfg := shortConfig()
 	cfg.DialTimeout = 200 * time.Millisecond
-	cfg.Auth = strings.Repeat("x", 1<<20) // 1MiB 载荷必然塞满回环缓冲
+	cfg.Auth = strings.Repeat("x", 15<<20) // 15MiB 塞满回环缓冲（内核缓冲数 MB 量级）
 	mustFailDial(t, addr, cfg, "write timeout must abort handshake")
 }
 
@@ -387,24 +387,37 @@ func TestClientHandshakeRetryAfterEstablished(t *testing.T) {
 // 断线后的重拨退避窗口内 Close：connectLoop 以静默 return 收敛，
 // 不再发起重拨（BackoffInitial 拉长以让 Close 稳定落在窗口内）。
 func TestClientCloseDuringReconnectBackoff(t *testing.T) {
-	addr := startRawListener(t, func(cn net.Conn) {
-		defer cn.Close()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	disconnected := make(chan struct{})
+	go func() {
+		cn, err := ln.Accept()
+		if err != nil {
+			return
+		}
 		br := bufio.NewReader(cn)
 		f, err := ReadFrame(br)
 		if err != nil || f.Type != TypeConnect {
+			_ = cn.Close()
 			return
 		}
 		aj, _ := connackFrame(&connackJSON{SessionID: "b1"})
 		if err := writeOnce(cn, aj); err != nil {
+			_ = cn.Close()
 			return
 		}
-		time.Sleep(100 * time.Millisecond) // 持有后断开
-	})
+		time.Sleep(50 * time.Millisecond) // 持有后断开
+		_ = cn.Close()
+		close(disconnected) // 断线信号：测试从这里起算，不再依赖握手快慢
+	}()
 
 	cfg := shortConfig()
 	cfg.BackoffInitial = 2 * time.Second
 	cfg.BackoffMax = 2 * time.Second
-	c, err := Dial(context.Background(), addr.String(), cfg)
+	c, err := Dial(context.Background(), ln.Addr().String(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -413,15 +426,18 @@ func TestClientCloseDuringReconnectBackoff(t *testing.T) {
 		t.Fatalf("session = %q, want b1", got)
 	}
 
-	// 断线约发生在 100ms；此后 connectLoop 在 [1s,2s] 的退避抖动里，
-	// 400ms 时 Close 必然命中 sleepBackoff 的 closed 分支。
-	time.Sleep(400 * time.Millisecond)
+	// 等断线确认后 300ms 再 Close：connectLoop 从 tr.dead 醒来到进入
+	// 262 行退避是微秒级，而退避抖动睡 [1s,2s]，300ms 时必然还在其中，
+	// Close 稳定命中 sleepBackoff 的 closed 分支。
+	<-disconnected
+	time.Sleep(300 * time.Millisecond)
 	c.Close()
 }
 
 // 关闭自动重连后连接消亡：connectLoop 静默退出，不再重拨。
 func TestClientReconnectDisabledExitsQuietly(t *testing.T) {
 	addr := startRawListener(t, func(c net.Conn) {
+		defer c.Close() // startRawListener 不负责关闭：不显式断线则循环卡死在 tr.dead
 		br := bufio.NewReader(c)
 		f, err := ReadFrame(br)
 		if err != nil || f.Type != TypeConnect {
