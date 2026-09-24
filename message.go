@@ -73,7 +73,7 @@ type emitter struct {
 }
 
 func (e *emitter) Emit(v any) error {
-	data, err := json.Marshal(v)
+	data, err := jsonMarshal(v)
 	if err != nil {
 		return err
 	}

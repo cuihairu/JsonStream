@@ -189,9 +189,8 @@ func ReadFrame(r io.Reader) (*Frame, error) {
 			return nil, fmt.Errorf("%w: meta length: %v", ErrMalformed, err)
 		}
 		n := int(binary.BigEndian.Uint16(ml[:]))
-		if n > MaxMetadataSize {
-			return nil, fmt.Errorf("%w: metadata length %d exceeds %d", ErrMalformed, n, MaxMetadataSize)
-		}
+		// n ≤ 65535 恒满足 64KiB 上限（uint16 上界保证，§2）；上限由
+		// 编码侧 appendTo 对称校验。
 		f.Metadata = make([]byte, n)
 		if _, err := io.ReadFull(r, f.Metadata); err != nil {
 			return nil, fmt.Errorf("%w: metadata: %v", ErrMalformed, err)

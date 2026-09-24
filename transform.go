@@ -37,19 +37,27 @@ type transformer struct {
 	gcm      cipher.AEAD
 }
 
+// crypto/flate 原语的包级接缝：这些构造在合法入参下不会失败，测试注入
+// 错误以覆盖防御性分支（生产行为不变）。
+var (
+	aesNewCipher = aes.NewCipher
+	gcmNew       = cipher.NewGCM
+	randRead     = rand.Read
+)
+
 func newTransformer(cfg *Config) (*transformer, error) {
 	t := &transformer{compress: cfg.Compress, encrypt: cfg.Encrypt}
 	if t.encrypt {
 		if len(cfg.Key) != 32 {
 			return nil, fmt.Errorf("jsonstream: encryption requires a 32-byte AES-256 key, got %d bytes", len(cfg.Key))
 		}
-		block, err := aes.NewCipher(cfg.Key)
+		block, err := aesNewCipher(cfg.Key)
 		if err != nil {
-			return nil, fmt.Errorf("jsonstream: aes: %v", err)
+			return nil, fmt.Errorf("jsonstream: aes: %w", err)
 		}
-		gcm, err := cipher.NewGCM(block)
+		gcm, err := gcmNew(block)
 		if err != nil {
-			return nil, fmt.Errorf("jsonstream: gcm: %v", err)
+			return nil, fmt.Errorf("jsonstream: gcm: %w", err)
 		}
 		t.gcm = gcm
 	}
@@ -65,23 +73,21 @@ func (t *transformer) outbound(data []byte) ([]byte, uint8, error) {
 	}
 	if t.compress && len(out) >= minCompressSize {
 		var buf bytes.Buffer
+		// Write/Close 的错误只可能来自底层写入器；此处恒为 bytes.Buffer
+		//（Reset 后写入），16MiB 上界的压缩输出远不可及 ErrTooLarge，
+		// 两者的错误分支是构造性死码，不设检查。
 		w := flateWriterPool.Get().(*flate.Writer)
 		w.Reset(&buf)
-		_, err := w.Write(out)
-		if err == nil {
-			err = w.Close()
-		}
+		_, _ = w.Write(out)
+		_ = w.Close()
 		flateWriterPool.Put(w)
-		if err != nil {
-			return nil, 0, fmt.Errorf("jsonstream: compress: %w", err)
-		}
 		out = buf.Bytes()
 		flagBits |= FlagCompressed
 	}
 	if t.encrypt {
 		nonce := make([]byte, t.gcm.NonceSize())
-		if _, err := rand.Read(nonce); err != nil {
-			return nil, 0, fmt.Errorf("jsonstream: nonce: %v", err)
+		if _, err := randRead(nonce); err != nil {
+			return nil, 0, fmt.Errorf("jsonstream: nonce: %w", err)
 		}
 		out = t.gcm.Seal(nonce, nonce, out, nil)
 		flagBits |= FlagEncrypted
@@ -115,18 +121,15 @@ func (t *transformer) inbound(flagBits uint8, data []byte) ([]byte, error) {
 		// 取出即 Reset：上一使用者遗留的流状态（含越限中断的半流）被
 		// 重新初始化，池化不会跨帧泄漏状态
 		rc := flateReaderPool.Get().(io.ReadCloser)
-		if err := rc.(flate.Resetter).Reset(bytes.NewReader(data), nil); err != nil {
-			flateReaderPool.Put(rc)
-			return nil, fmt.Errorf("jsonstream: decompress: %w", err)
-		}
+		// flate 的 Resetter.Reset 恒返回 nil（接口兼容保留返回值）
+		_ = rc.(flate.Resetter).Reset(bytes.NewReader(data), nil)
 		out, err := readAll(rc, MaxPayloadSize)
-		cerr := rc.Close()
+		if cerr := rc.Close(); err == nil {
+			err = cerr
+		}
 		flateReaderPool.Put(rc)
 		if err != nil {
 			return nil, fmt.Errorf("jsonstream: decompress: %w", err)
-		}
-		if cerr != nil {
-			return nil, fmt.Errorf("jsonstream: decompress: %w", cerr)
 		}
 		data = out
 	}

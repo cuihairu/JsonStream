@@ -56,10 +56,10 @@ func effectiveConnack(srvCfg Config, cj *connectJSON) connackJSON {
 		HeartbeatMS: int(srvCfg.Heartbeat / time.Millisecond),
 		RetentionMS: int(srvCfg.Retention / time.Millisecond),
 	}
-	if srvCfg.Credit > 0 && cj.Credit > 0 && cj.Credit < srvCfg.Credit {
-		aj.Credit = cj.Credit
-	} else if srvCfg.Credit > 0 {
-		aj.Credit = srvCfg.Credit
+	if srvCfg.Credit > 0 && cj.Credit > 0 {
+		// 生效值 = 双方声明的较小者；任一方声明 0 即整体关闭背压（§6.1），
+		// 服务端不得把自己的窗口强加给明确拒绝的客户端。
+		aj.Credit = min(srvCfg.Credit, cj.Credit)
 	}
 	return aj
 }

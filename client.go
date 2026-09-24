@@ -393,6 +393,9 @@ func (c *Client) bindSession(conn net.Conn, br *bufio.Reader, aj *connackJSON) (
 	return tr, nil
 }
 
+// resubAckTimeout 是重订等待 SUBACK 的上限；包级接缝便于测试缩短。
+var resubAckTimeout = 5 * time.Second
+
 // resubscribeLocked 在新 endpoint 上重发 SUBSCRIBE（订阅关系未被服务端
 // 保留时的重建路径），等 SUBACK 确认后重启投递消费 goroutine。等待是
 // 必要的：回调（OnResumeFailed）先于应用恢复广播发布，若不等确认，
@@ -412,7 +415,7 @@ func (c *Client) resubscribeLocked(ep *endpoint, sub *Subscription) {
 	case <-flw.ackCh:
 	case <-flw.doneCh:
 		return // 流已被终结（错误），不重启消费
-	case <-time.After(5 * time.Second):
+	case <-time.After(resubAckTimeout):
 		ep.log.Printf("jsonstream: client: resubscribe %q timed out waiting SUBACK", sub.topic)
 		return
 	}

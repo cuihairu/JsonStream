@@ -37,6 +37,9 @@ func (g *creditGate) add(n int) {
 
 // take 取走一个令牌；额度耗尽时阻塞直到补充、ctx 取消或连接关闭。
 func (g *creditGate) take(ctx context.Context) error {
+	if g == nil { // 与 add/close 一致：nil gate 视为已关闭
+		return ErrClosed
+	}
 	for {
 		g.mu.Lock()
 		if g.closed {
