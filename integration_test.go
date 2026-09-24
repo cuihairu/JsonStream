@@ -2247,3 +2247,50 @@ func TestConcurrentClientsGoroutineBaseline(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// TestServerInitiatedCancel：服务端发起流的主动取消——srv.Stream 取得读
+// 流后 Cancel，CANCEL 帧下行传播到客户端 responder 的 Emitter，handler
+// 以 CANCELLED 退出；此前只测过客户端发起方向的取消（上行 CANCEL）。
+func TestServerInitiatedCancel(t *testing.T) {
+	srv, addr := startTestServer(t, shortConfig(), nil)
+	c := dialTest(t, addr, shortConfig())
+	ctx := context.Background()
+
+	handlerErr := make(chan error, 1)
+	c.HandleStream("slow", func(_ *Request, em Emitter) error {
+		for {
+			if err := em.Emit(item{N: 1}); err != nil {
+				handlerErr <- err
+				return err
+			}
+		}
+	})
+
+	rs, err := srv.Stream(ctx, c.SessionID(), "slow", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rs.Next(ctx); !ok { // 首帧确认 handler 已在跑
+		t.Fatalf("no first frame: %v", rs.Err())
+	}
+	if err := rs.Cancel(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-handlerErr:
+		var je *Error
+		if !errors.As(err, &je) || je.Code != CodeCancelled {
+			t.Fatalf("handler want CANCELLED, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancel did not reach client handler")
+	}
+	if _, ok := rs.Next(ctx); ok {
+		t.Fatal("stream should be over after cancel")
+	}
+	var je *Error
+	if !errors.As(rs.Err(), &je) || je.Code != CodeCancelled {
+		t.Fatalf("want CANCELLED, got %v", rs.Err())
+	}
+}

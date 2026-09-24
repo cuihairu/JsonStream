@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 )
 
 // 线上帧布局（大端序），见 docs/protocol.md §3：
@@ -28,8 +29,9 @@ const (
 
 	// MaxPayloadSize 是单帧载荷（变换后）的上限，超限直接断开以防 OOM。
 	MaxPayloadSize = 16 << 20 // 16 MiB
-	// MaxMetadataSize 是 Metadata 的上限。
-	MaxMetadataSize = 64 << 10 // 64 KiB
+	// MaxMetadataSize 是 Metadata 的上限。线上 metaLen 字段是 uint16，
+	// 恰 64 KiB 的元数据无法表达（编码会截断成 0），故上界为 64 KiB-1。
+	MaxMetadataSize = math.MaxUint16 // 64 KiB - 1
 
 	headerSize  = 14
 	metaLenSize = 2
@@ -141,9 +143,13 @@ func (f *Frame) appendTo(dst []byte) ([]byte, error) {
 	dst = binary.BigEndian.AppendUint16(dst, magic0<<8|magic1)
 	dst = append(dst, f.Version, flags, byte(f.Type), 0)
 	dst = binary.BigEndian.AppendUint32(dst, f.StreamID)
-	dst = binary.BigEndian.AppendUint32(dst, uint32(len(f.Payload)))
+	// 上方已校验 len ≤ MaxPayloadSize（uint32 远不可及），min 把边界
+	// 显式化，转换不会溢出。
+	dst = binary.BigEndian.AppendUint32(dst, uint32(min(len(f.Payload), MaxPayloadSize)))
 	if flags&FlagHasMeta != 0 {
-		dst = binary.BigEndian.AppendUint16(dst, uint16(len(f.Metadata)))
+		// 上方已校验 len ≤ MaxMetadataSize（uint16 可表达上界），min
+		// 把边界显式化，转换不会截断。
+		dst = binary.BigEndian.AppendUint16(dst, uint16(min(len(f.Metadata), MaxMetadataSize)))
 		dst = append(dst, f.Metadata...)
 	}
 	dst = append(dst, f.Payload...)
@@ -190,8 +196,8 @@ func ReadFrame(r io.Reader) (*Frame, error) {
 			return nil, fmt.Errorf("%w: meta length: %w", ErrMalformed, err)
 		}
 		n := int(binary.BigEndian.Uint16(ml[:]))
-		// n ≤ 65535 恒满足 64KiB 上限（uint16 上界保证，§2）；上限由
-		// 编码侧 appendTo 对称校验。
+		// n ≤ 65535 = MaxMetadataSize（uint16 上界保证，§2）；编码侧
+		// appendTo 对称校验。
 		f.Metadata = make([]byte, n)
 		if _, err := io.ReadFull(r, f.Metadata); err != nil {
 			return nil, fmt.Errorf("%w: metadata: %w", ErrMalformed, err)

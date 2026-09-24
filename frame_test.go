@@ -298,6 +298,28 @@ func TestFrameAppendToMetadataTooLarge(t *testing.T) {
 	}
 }
 
+// 上边界：恰 MaxMetadataSize（65535）可编码，且解码互逆。历史上上限
+// 写成 64KiB 整（65536），`>` 校验放行后 uint16 截断为 0，编出
+// metaLen=0 却携带 64KiB 元数据的错乱帧——解码端把元数据当载荷。
+func TestFrameAppendToMetadataBoundary(t *testing.T) {
+	f := &Frame{Header: Header{Version: ProtocolVersion, Type: TypeResponse}, Payload: []byte("ok")}
+	f.Metadata = make([]byte, MaxMetadataSize)
+	for i := range f.Metadata {
+		f.Metadata[i] = byte(i)
+	}
+	enc, err := f.appendTo(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := ReadFrame(bytes.NewReader(enc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(back.Metadata, f.Metadata) || !bytes.Equal(back.Payload, f.Payload) {
+		t.Fatalf("round-trip mismatch: meta=%d payload=%q", len(back.Metadata), back.Payload)
+	}
+}
+
 // 帧头声称带元数据但流在 metaLen 段前截断。
 func TestFrameReadTruncatedMetaLength(t *testing.T) {
 	f := &Frame{Header: Header{Version: ProtocolVersion, Flags: FlagHasMeta, Type: TypePing}}
