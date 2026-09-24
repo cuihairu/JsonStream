@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -2242,6 +2245,117 @@ func TestConcurrentClientsGoroutineBaseline(t *testing.T) {
 			n := runtime.Stack(buf, true)
 			t.Fatalf("goroutines did not return to baseline: %d > %d\n%s",
 				runtime.NumGoroutine(), before+2, buf[:n])
+		}
+		runtime.GC()
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// fd 泄漏守卫：与 goroutine 守卫互补——conn 的 Close 被漏调时不一定
+// 泄漏 goroutine（读循环可能恰好已自行退出），但 fd 一定还挂在进程上。
+// 三类完整的连接生命周期各重复若干轮后，进程 fd 总数必须回归基线：
+// 正常收尾、客户端中途杀活流、读空到服务端自然终结。基线取自拨号之前，
+// 只看增量；ReadDir 的返回值含读目录自身的 fd，基线与复查同口径即可。
+// 仅 Linux 有 /proc/self/fd，其余平台跳过。
+func TestConnectionFDBaseline(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("fd guard relies on /proc/self/fd")
+	}
+	countFD := func() int {
+		t.Helper()
+		entries, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			t.Fatalf("read /proc/self/fd: %v", err)
+		}
+		return len(entries)
+	}
+	_, addr := startTestServer(t, shortConfig(), func(s *Server) {
+		s.Handle("echo", func(req *Request) (any, error) {
+			var it item
+			if err := req.Decode(&it); err != nil {
+				return nil, &Error{Code: CodeInvalid, Message: err.Error()}
+			}
+			return item{N: it.N * 2}, nil
+		})
+		s.HandleStream("range", func(req *Request, em Emitter) error {
+			var it item
+			if err := req.Decode(&it); err != nil {
+				return err
+			}
+			for i := 0; i < it.N; i++ {
+				if err := em.Emit(item{N: i}); err != nil {
+					return err
+				}
+			}
+			return nil // 自动 COMPLETE
+		})
+	})
+	before := countFD()
+
+	for i := 0; i < 20; i++ { // 正常轮：请求 + 流式 + 主动取消 + 干净关闭
+		c := dialTest(t, addr, shortConfig())
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if _, err := c.Request(ctx, "echo", item{N: i}); err != nil {
+			t.Fatalf("round %d request: %v", i, err)
+		}
+		st, err := c.Stream(ctx, "range", item{N: 2})
+		if err != nil {
+			t.Fatalf("round %d stream: %v", i, err)
+		}
+		if _, ok := st.Next(ctx); !ok {
+			t.Fatalf("round %d stream ended early: %v", i, st.Err())
+		}
+		if err := st.Cancel(); err != nil {
+			t.Fatalf("round %d cancel: %v", i, err)
+		}
+		cancel()
+		c.Close()
+	}
+	for i := 0; i < 10; i++ { // 客户端杀轮：流进行中直接断开，不等终态
+		c := dialTest(t, addr, shortConfig())
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		st, err := c.Stream(ctx, "range", item{N: 2})
+		if err != nil {
+			t.Fatalf("kill round %d stream: %v", i, err)
+		}
+		if _, ok := st.Next(ctx); !ok {
+			t.Fatalf("kill round %d stream ended early: %v", i, st.Err())
+		}
+		cancel()
+		c.Close()
+	}
+	for i := 0; i < 10; i++ { // 自然终结轮：读空到 COMPLETE，流走正常终点
+		c := dialTest(t, addr, shortConfig())
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		st, err := c.Stream(ctx, "range", item{N: 2})
+		if err != nil {
+			t.Fatalf("fin round %d stream: %v", i, err)
+		}
+		for {
+			if _, ok := st.Next(ctx); !ok {
+				break
+			}
+		}
+		if err := st.Err(); err != nil {
+			t.Fatalf("fin round %d: %v", i, err)
+		}
+		cancel()
+		c.Close()
+	}
+
+	// 守卫：轮询 fd 回归基线（±2 容差吸收 runtime 噪声）；超时打印
+	// fd 清单，泄漏物是 socket 还是文件一眼可辨
+	deadline := time.Now().Add(5 * time.Second)
+	for countFD() > before+2 {
+		if time.Now().After(deadline) {
+			entries, _ := os.ReadDir("/proc/self/fd")
+			var detail strings.Builder
+			for _, e := range entries {
+				link, _ := os.Readlink("/proc/self/fd/" + e.Name())
+				fmt.Fprintf(&detail, "  %s -> %s\n", e.Name(), link)
+			}
+			t.Fatalf("fds did not return to baseline: %d > %d\n%s",
+				countFD(), before+2, detail.String())
 		}
 		runtime.GC()
 		time.Sleep(20 * time.Millisecond)
