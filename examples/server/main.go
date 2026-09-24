@@ -96,7 +96,11 @@ func main() {
 					log.Printf("oneway to %s: %v", sid[:8], err)
 					continue
 				}
-				m, err := srv.Request(context.Background(), sid, "client.time", nil)
+				// 对端请求必须带超时：客户端不实现 client.time 或卡死时，
+				// 无超时的 Request 会永久挂起并停摆整个通知循环
+				reqCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				m, err := srv.Request(reqCtx, sid, "client.time", nil)
+				cancel()
 				if err != nil {
 					log.Printf("request to %s: %v", sid[:8], err)
 					continue
