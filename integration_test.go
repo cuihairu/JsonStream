@@ -2357,3 +2357,53 @@ func TestServerInitiatedChannelCancel(t *testing.T) {
 		t.Fatalf("want CANCELLED, got %v", err)
 	}
 }
+
+// TestZeroValueConfigDial：零值 Config 直接 Dial——用户最自然的写法
+// （不查 DefaultConfig）也必须可用。normalized 在 Dial/NewServer 入口
+// 兜底心跳/保留期/退避等默认值，Reconnect 为 nil 指针时默认开启；
+// 此处验证的是整条链路（握手/请求/订阅/发布）而非字段默认值本身。
+func TestZeroValueConfigDial(t *testing.T) {
+	_, addr := startTestServer(t, Config{}, func(s *Server) {
+		s.Handle("math.add", func(req *Request) (any, error) {
+			var in struct {
+				A, B int
+			}
+			if err := req.Decode(&in); err != nil {
+				return nil, err
+			}
+			return map[string]int{"sum": in.A + in.B}, nil
+		})
+	})
+	c, err := Dial(context.Background(), addr, Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ctx := context.Background()
+
+	m, err := c.Request(ctx, "math.add", map[string]int{"a": 1, "b": 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sum struct {
+		Sum int `json:"sum"`
+	}
+	if err := m.Decode(&sum); err != nil || sum.Sum != 3 {
+		t.Fatalf("want 3, got %+v err=%v", sum, err)
+	}
+
+	sub, err := c.Subscribe(ctx, "ztopic", func(*Message) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Publish("ztopic", map[string]int{"v": 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sub.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// 保留期/退避也走了默认值：会话 ID 非空即服务端已按默认保留。
+	if c.SessionID() == "" {
+		t.Fatal("empty session id")
+	}
+}
