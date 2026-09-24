@@ -91,8 +91,6 @@ func main() {
 	log.Printf("sent oneway + published metrics")
 
 	// 挂在订阅上观察广播；演示时长结束后退出。
-	select {
-	case <-time.After(time.Duration(*demoSec) * time.Second):
-	}
+	time.Sleep(time.Duration(*demoSec) * time.Second)
 	log.Printf("done")
 }

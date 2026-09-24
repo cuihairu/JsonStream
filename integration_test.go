@@ -135,7 +135,7 @@ func TestResumeReplaysPendingFrames(t *testing.T) {
 	if err := m.Decode(&i1); err != nil || i1.N != 1 {
 		t.Fatalf("want n=1, got %+v err=%v", i1, err)
 	}
-	m, ok = stream.Next(ctx)
+	m, _ = stream.Next(ctx) // 失败会让下面的 Decode 空指针崩掉测试，无需查 ok
 	var i2 item
 	if err := m.Decode(&i2); err != nil || i2.N != 2 {
 		t.Fatalf("want n=2, got %+v err=%v", i2, err)

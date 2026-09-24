@@ -3,7 +3,6 @@ package jsonstream
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"errors"
 	"net"
 	"testing"
@@ -170,7 +169,6 @@ func transformRoundTrip(t *testing.T, cfg Config, payload []byte) {
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("round-trip mismatch: got %d bytes want %d", len(got), len(payload))
 	}
-	return
 }
 
 func TestTransformPlain(t *testing.T) {
@@ -290,13 +288,4 @@ func TestHandshakeVersionMismatch(t *testing.T) {
 	if got.Type != TypeError || errDecode(got.Payload).Code != CodeProtocol {
 		t.Fatalf("want ERROR(PROTOCOL), got %s", got.Type)
 	}
-}
-
-func randomPayload(t *testing.T, n int) []byte {
-	t.Helper()
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		t.Fatal(err)
-	}
-	return b
 }

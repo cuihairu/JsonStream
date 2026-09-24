@@ -187,12 +187,3 @@ func (t *transport) kill(err error) {
 		}
 	})
 }
-
-func (t *transport) waitDead(ctx context.Context) error {
-	select {
-	case <-t.dead:
-		return t.deadErr
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
