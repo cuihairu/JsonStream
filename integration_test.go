@@ -2294,3 +2294,66 @@ func TestServerInitiatedCancel(t *testing.T) {
 		t.Fatalf("want CANCELLED, got %v", rs.Err())
 	}
 }
+
+// TestServerInitiatedChannelCancel：服务端发起通道的主动取消——CANCEL
+// 下行传播到客户端 handler，阻塞中的 Receive 以 CANCELLED 退出（与
+// Stream 版互补：Channel 的取消感知走 Receive 的终结排空分支）。
+func TestServerInitiatedChannelCancel(t *testing.T) {
+	srv, addr := startTestServer(t, shortConfig(), nil)
+	c := dialTest(t, addr, shortConfig())
+	ctx := context.Background()
+
+	handlerErr := make(chan error, 1)
+	handlerGot := make(chan int, 1)
+	c.HandleChannel("chat", func(ch *Channel) error {
+		for {
+			m, err := ch.Receive(ctx)
+			if err != nil {
+				handlerErr <- err
+				return err
+			}
+			var it item
+			if err := m.Decode(&it); err != nil {
+				handlerErr <- err
+				return err
+			}
+			handlerGot <- it.N
+		}
+	})
+
+	ch, err := srv.Channel(ctx, c.SessionID(), "chat", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.Send(item{N: 7}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-handlerGot:
+		if got != 7 {
+			t.Fatalf("want 7, got %d", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not receive")
+	}
+	if err := ch.Cancel(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-handlerErr:
+		var je *Error
+		if !errors.As(err, &je) || je.Code != CodeCancelled {
+			t.Fatalf("handler want CANCELLED, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancel did not reach client handler")
+	}
+	_, err = ch.Receive(ctx)
+	if err == nil {
+		t.Fatal("Receive after cancel must fail")
+	}
+	var je *Error
+	if !errors.As(err, &je) || je.Code != CodeCancelled {
+		t.Fatalf("want CANCELLED, got %v", err)
+	}
+}
