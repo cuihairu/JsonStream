@@ -91,6 +91,9 @@ go test ./...
 go vet ./...
 go test -bench . -benchtime 2s
 
+# fuzz 信任边界（帧解析 / 变换层 / 握手状态机），已实锤并修复过 2 个真 bug
+go test -run '^$' -fuzz FuzzReadFrame -fuzztime 30s ./...
+
 # 示例：终端 1 启动服务端
 go run ./examples/server
 

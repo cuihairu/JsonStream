@@ -3,7 +3,9 @@ package jsonstream
 import (
 	"bytes"
 	"compress/flate"
+	"context"
 	"errors"
+	"net"
 	"testing"
 )
 
@@ -122,4 +124,57 @@ func TestDecompressionBombCapped(t *testing.T) {
 	if !bytes.Equal(out, src) {
 		t.Fatal("roundtrip mismatch for legitimate compressed payload")
 	}
+}
+
+// FuzzRawPeer：把任意字节流打进真实监听器的握手状态机（handleConn），
+// 服务端必须优雅拒绝——不得 panic、不得被单条恶意连接拖垮，且随后
+// 合法客户端仍能完成一次完整请求（跨连接状态未受污染）。
+func FuzzRawPeer(f *testing.F) {
+	cfg := shortConfig()
+	cfg.Logger = nil   // 静默：fuzz 的每次拒绝都会打 bad handshake 日志
+	cfg.Retention = -1 // 禁用会话保留：探测客户端用完即弃，不积累
+	scfg := cfg
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		f.Skip(err)
+	}
+	srv, err := NewServer(ln, scfg)
+	if err != nil {
+		f.Fatal(err)
+	}
+	srv.Handle("ping", func(req *Request) (any, error) { return item{N: 1}, nil })
+	go srv.Serve()
+	f.Cleanup(func() { _ = srv.Close() })
+
+	connectSeed, err := (&Frame{
+		Header:  Header{Version: ProtocolVersion, Type: TypeConnect},
+		Payload: []byte(`{"version":1,"credit":8}`),
+	}).appendTo(nil)
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(connectSeed)
+	f.Add([]byte{}) // 空连接（立即断开）
+	f.Add([]byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n"))
+	f.Add(bytes.Repeat([]byte{0x4a, 0x53, 1, 0x0f, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0}, 4))
+	f.Add([]byte{0x4a, 0x53, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0x7b, 0x22, 0x7d}) // 半截 JSON
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		nc, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Skip(err)
+		}
+		_, _ = nc.Write(data) // 写失败合法：服务端可能已判死并关闭
+		_ = nc.Close()
+
+		// 恶意流之后，合法客户端必须仍能完成完整请求
+		c, err := Dial(context.Background(), ln.Addr().String(), scfg)
+		if err != nil {
+			t.Fatalf("server not serving after malicious peer: %v", err)
+		}
+		if _, err := c.Request(context.Background(), "ping", nil); err != nil {
+			t.Fatalf("request after malicious peer: %v", err)
+		}
+		_ = c.Close()
+	})
 }
