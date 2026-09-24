@@ -86,9 +86,11 @@
 # 快速开始
 
 ```bash
-# 运行测试与基准（无第三方依赖，Go ≥ 1.24）
+# 运行测试与基准（无第三方依赖，Go ≥ 1.24；语句覆盖率 100%，
+# go test -cover 实测，测试策略见 docs/design-notes.md §9）
 go test ./...
 go vet ./...
+go test -cover ./...
 go test -bench . -benchtime 2s
 
 # fuzz 信任边界（帧解析 / 变换层 / 握手状态机），已实锤并修复过 2 个真 bug
