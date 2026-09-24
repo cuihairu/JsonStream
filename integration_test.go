@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1390,5 +1391,62 @@ func TestRequestContextTimeout(t *testing.T) {
 	var it item
 	if err := m.Decode(&it); err != nil || it.N != 2 {
 		t.Fatalf("want 2, got %+v err=%v", it, err)
+	}
+}
+
+// 高并发 + 泄漏守卫：N 客户端并发请求/流式交互全部完成后，goroutine
+// 数必须回归基线——读写循环、connectLoop、流消费 goroutine 都要随
+// 连接关闭退出，长跑服务不得积累。基线取自拨号之前，守卫只看增量。
+func TestConcurrentClientsGoroutineBaseline(t *testing.T) {
+	addr := setupModeServer(t)
+	before := runtime.NumGoroutine()
+
+	const n = 20
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c, err := Dial(context.Background(), addr, shortConfig())
+			if err != nil {
+				t.Errorf("dial: %v", err)
+				return
+			}
+			defer c.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			for k := 0; k < 3; k++ {
+				if _, err := c.Request(ctx, "echo", item{N: k}); err != nil {
+					t.Errorf("request: %v", err)
+					return
+				}
+			}
+			st, err := c.Stream(ctx, "range", item{N: 3})
+			if err != nil {
+				t.Errorf("stream: %v", err)
+				return
+			}
+			for want := 0; want < 3; want++ {
+				if _, ok := st.Next(ctx); !ok {
+					t.Errorf("stream ended early at %d (err=%v)", want, st.Err())
+					return
+				}
+			}
+			_ = st.Cancel()
+		}()
+	}
+	wg.Wait()
+
+	// 守卫：GC + 轮询等待 goroutine 收敛；基线 ±2 容差吸收 runtime 噪声
+	deadline := time.Now().Add(5 * time.Second)
+	for runtime.NumGoroutine() > before+2 {
+		if time.Now().After(deadline) {
+			buf := make([]byte, 1<<20)
+			n := runtime.Stack(buf, true)
+			t.Fatalf("goroutines did not return to baseline: %d > %d\n%s",
+				runtime.NumGoroutine(), before+2, buf[:n])
+		}
+		runtime.GC()
+		time.Sleep(20 * time.Millisecond)
 	}
 }
