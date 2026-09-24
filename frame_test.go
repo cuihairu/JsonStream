@@ -320,6 +320,21 @@ func TestFrameAppendToMetadataBoundary(t *testing.T) {
 	}
 }
 
+// ReadFrame 拒绝不支持的协议版本——版本升级时老端必须明确拒绝，
+// 而不是按错误偏移误解析（§2）。
+func TestFrameReadUnsupportedVersion(t *testing.T) {
+	for _, v := range []uint8{0, ProtocolVersion + 1} {
+		f := &Frame{Header: Header{Version: v, Type: TypeRequest, StreamID: 1}, Payload: []byte("{}")}
+		enc, err := f.appendTo(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadFrame(bytes.NewReader(enc)); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("version %d: want ErrMalformed, got %v", v, err)
+		}
+	}
+}
+
 // 帧头声称带元数据但流在 metaLen 段前截断。
 func TestFrameReadTruncatedMetaLength(t *testing.T) {
 	f := &Frame{Header: Header{Version: ProtocolVersion, Flags: FlagHasMeta, Type: TypePing}}
