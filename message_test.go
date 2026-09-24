@@ -34,3 +34,18 @@ func TestEmitterTakeCreditError(t *testing.T) {
 		t.Fatalf("emit on closed gate = %v, want ErrClosed", err)
 	}
 }
+
+// 流正常终结（complete，无错误）后再 Emit：立即以 CANCELLED 失败，不往
+// 已终结的流上发帧（handler complete 后继续 emit 的收尾路径）。
+func TestEmitterEmitAfterComplete(t *testing.T) {
+	cfg := shortConfig()
+	tr, _ := newTestTransport(t, cfg.normalized(), 0)
+	ep := &endpoint{tr: tr, cfg: cfg.normalized()}
+	e := &emitter{ep: ep, flw: newFlow(1, flowStream, ep)}
+	e.flw.complete()
+	err := e.Emit(item{N: 1})
+	var je *Error
+	if !errors.As(err, &je) || je.Code != CodeCancelled {
+		t.Fatalf("emit after complete = %v, want CANCELLED", err)
+	}
+}

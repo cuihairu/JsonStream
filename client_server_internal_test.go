@@ -437,6 +437,56 @@ func TestClientCloseDuringReconnectBackoff(t *testing.T) {
 	c.Close()
 }
 
+// TestClientCloseDuringRetryBackoff：重拨失败后的退避同样可被 Close 打断
+// （与连接死亡后的首拍退避 TestClientCloseDuringReconnectBackoff 互补）。
+// listener 关闭后重拨必然连接拒绝，进入 2s 退避；300ms 时 Close 稳定命中
+// sleepBackoff 的 closed 分支，循环以 return 终止而非继续重拨。
+func TestClientCloseDuringRetryBackoff(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	disconnected := make(chan struct{})
+	go func() {
+		cn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		br := bufio.NewReader(cn)
+		f, err := ReadFrame(br)
+		if err != nil || f.Type != TypeConnect {
+			_ = cn.Close()
+			return
+		}
+		aj, _ := connackFrame(&connackJSON{SessionID: "b2"})
+		if err := writeOnce(cn, aj); err != nil {
+			_ = cn.Close()
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+		_ = cn.Close()
+		close(disconnected)
+	}()
+
+	cfg := shortConfig()
+	cfg.BackoffInitial = 2 * time.Second
+	cfg.BackoffMax = 2 * time.Second
+	c, err := Dial(context.Background(), ln.Addr().String(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	if got := c.SessionID(); got != "b2" {
+		t.Fatalf("session = %q, want b2", got)
+	}
+
+	<-disconnected
+	ln.Close() // 此后的重拨必然连接拒绝 → 进入重试退避
+	time.Sleep(300 * time.Millisecond)
+	c.Close()
+}
+
 // 关闭自动重连后连接消亡：connectLoop 静默退出，不再重拨。
 func TestClientReconnectDisabledExitsQuietly(t *testing.T) {
 	addr := startRawListener(t, func(c net.Conn) {

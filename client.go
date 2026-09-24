@@ -366,7 +366,7 @@ func (c *Client) bindSession(conn net.Conn, br *bufio.Reader, aj *connackJSON) (
 	if oldEp != nil {
 		for id, flw := range oldEp.snapshot() {
 			if id%2 == 1 && !flw.isDone() {
-				flw.ep = ep
+				flw.setEndpoint(ep)
 				ep.registerFlow(flw)
 			}
 		}

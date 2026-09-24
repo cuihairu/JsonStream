@@ -80,7 +80,7 @@ func (flw *flow) deliver(f *Frame) bool {
 
 // creditIn 在收到受背压约束的数据帧时记账。
 func (flw *flow) creditIn() {
-	if flw.ep.creditWindow <= 0 || flw.kind == flowRequest {
+	if flw.currentEP().creditWindow <= 0 || flw.kind == flowRequest {
 		return
 	}
 	flw.mu.Lock()
@@ -91,7 +91,7 @@ func (flw *flow) creditIn() {
 // release 在消息交付应用后归还额度；累计到半窗时批量回授 CREDIT 帧
 // （HTTP/2 WINDOW_UPDATE 的惯例位置：太早背压失效，太晚吞吐骤降）。
 func (flw *flow) release(n int) {
-	ep := flw.ep
+	ep := flw.currentEP()
 	if ep.creditWindow <= 0 || flw.kind == flowRequest {
 		return
 	}
@@ -117,6 +117,21 @@ func (flw *flow) complete() { flw.finish(nil) }
 
 func (flw *flow) fail(e *Error) { flw.finish(e) }
 
+// setEndpoint 会话恢复迁移时换绑当前连接的 endpoint。读写都以 mu 保护：
+// 迁移与用户 goroutine 的出站（Send/Cancel/Close）及消费侧记账
+// （creditIn/release）和终结（finish）之间没有任何别的同步关系。
+func (flw *flow) setEndpoint(ep *endpoint) {
+	flw.mu.Lock()
+	flw.ep = ep
+	flw.mu.Unlock()
+}
+
+func (flw *flow) currentEP() *endpoint {
+	flw.mu.Lock()
+	defer flw.mu.Unlock()
+	return flw.ep
+}
+
 func (flw *flow) finish(e *Error) {
 	flw.mu.Lock()
 	if flw.done {
@@ -126,8 +141,9 @@ func (flw *flow) finish(e *Error) {
 	flw.done = true
 	flw.err = e
 	close(flw.doneCh)
+	ep := flw.ep
 	flw.mu.Unlock()
-	flw.ep.unregisterFlow(flw)
+	ep.unregisterFlow(flw)
 }
 
 func (flw *flow) ack() {
@@ -192,14 +208,15 @@ func (s *ReadStream) Err() error {
 	return s.f.err
 }
 
-// Cancel 取消流：发 CANCEL 并本地终结。帧经 f.ep 发送——会话恢复迁移后
-// f.ep 是当前连接，构造时的 endpoint 已死（陈旧 ep 引用只会让 CANCEL 静默
-// 丢失，对端 handler 永远收不到取消）。
+// Cancel 取消流：发 CANCEL 并本地终结。帧经当前 endpoint 发送——会话恢复
+// 迁移后是重连的新连接，构造时的 endpoint 已死（陈旧 ep 引用只会让 CANCEL
+// 静默丢失，对端 handler 永远收不到取消）。
 func (s *ReadStream) Cancel() error {
 	if s == nil || s.f.isDone() {
 		return nil
 	}
-	_ = s.f.ep.tr.send(&Frame{Header: Header{Version: ProtocolVersion, Type: TypeCancel, StreamID: s.f.id}})
+	ep := s.f.currentEP()
+	_ = ep.tr.send(&Frame{Header: Header{Version: ProtocolVersion, Type: TypeCancel, StreamID: s.f.id}})
 	s.f.fail(&Error{Code: CodeCancelled, Message: "cancelled by caller"})
 	return nil
 }
@@ -215,7 +232,8 @@ type Channel struct {
 }
 
 // Send 发送一帧（受背压约束；额度耗尽时阻塞直到补充或 ctx/流终结）。
-// 出站一律经 f.ep：会话恢复迁移后 f.ep 是当前连接，构造时的 endpoint 已死。
+// 出站一律经当前 endpoint：会话恢复迁移后是重连的新连接，构造时的
+// endpoint 已死。
 func (c *Channel) Send(v any) error {
 	data, err := jsonMarshal(v)
 	if err != nil {
@@ -224,10 +242,11 @@ func (c *Channel) Send(v any) error {
 	if c.f.isDone() {
 		return ErrClosed
 	}
-	if err := c.f.ep.tr.takeCredit(c.ctx); err != nil {
+	ep := c.f.currentEP()
+	if err := ep.tr.takeCredit(c.ctx); err != nil {
 		return err
 	}
-	return c.f.ep.emit(&Frame{
+	return ep.emit(&Frame{
 		Header:  Header{Version: ProtocolVersion, Type: TypeResponse, StreamID: c.f.id},
 		Payload: data,
 	})
@@ -264,7 +283,8 @@ func (c *Channel) Close() error {
 	if c.f.isDone() {
 		return nil
 	}
-	_ = c.f.ep.emit(completeFrame(c.f.id))
+	ep := c.f.currentEP()
+	_ = ep.emit(completeFrame(c.f.id))
 	c.f.complete()
 	return nil
 }
@@ -274,7 +294,8 @@ func (c *Channel) Cancel() error {
 	if c.f.isDone() {
 		return nil
 	}
-	_ = c.f.ep.tr.send(&Frame{Header: Header{Version: ProtocolVersion, Type: TypeCancel, StreamID: c.f.id}})
+	ep := c.f.currentEP()
+	_ = ep.tr.send(&Frame{Header: Header{Version: ProtocolVersion, Type: TypeCancel, StreamID: c.f.id}})
 	c.f.fail(&Error{Code: CodeCancelled, Message: "cancelled"})
 	return nil
 }
@@ -307,7 +328,7 @@ func (s *Subscription) consume() {
 		case frm := <-f.frames:
 			f.release(1)
 			if err := s.h(toMessage(frm)); err != nil {
-				f.ep.log.Printf("jsonstream: subscription %q callback error: %v", s.topic, err)
+				f.currentEP().log.Printf("jsonstream: subscription %q callback error: %v", s.topic, err)
 			}
 		case <-f.doneCh:
 			// 排空终结前已入队的余帧后再退出。
@@ -316,7 +337,7 @@ func (s *Subscription) consume() {
 				case frm := <-f.frames:
 					f.release(1)
 					if err := s.h(toMessage(frm)); err != nil {
-						f.ep.log.Printf("jsonstream: subscription %q callback error: %v", s.topic, err)
+						f.currentEP().log.Printf("jsonstream: subscription %q callback error: %v", s.topic, err)
 					}
 				default:
 					return
@@ -326,16 +347,17 @@ func (s *Subscription) consume() {
 	}
 }
 
-// Close 退订：发 UNSUBSCRIBE 并终结本地流。帧必须经 f.ep 发送——会话
-// 恢复后 f 已随订阅流迁移到新 endpoint，s.ep 仍是创建时的旧连接，从它
-// 发送只会得到 ErrClosed，退订帧静默丢失（服务端永远摘不掉该订阅）。
+// Close 退订：发 UNSUBSCRIBE 并终结本地流。帧必须经当前 endpoint 发送
+// ——会话恢复后订阅流已迁移到新连接，构造时的旧连接上发送只会得到
+// ErrClosed，退订帧静默丢失（服务端永远摘不掉该订阅）。
 func (s *Subscription) Close() error {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		f := s.f
 		s.mu.Unlock()
 		if f != nil {
-			_ = f.ep.tr.send(&Frame{
+			ep := f.currentEP()
+			_ = ep.tr.send(&Frame{
 				Header:   Header{Version: ProtocolVersion, Type: TypeUnsubscribe, StreamID: f.id},
 				Metadata: encodeMeta("", s.topic),
 			})

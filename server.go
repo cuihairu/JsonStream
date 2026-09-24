@@ -73,8 +73,8 @@ func (s *Server) Publish(topic string, payload any) error {
 	}
 	// 遍历会话存储而非活跃连接：断开保留中的会话仍订阅着主题，
 	// 其投递经 sendDown 进入保留队列，重连后重放（§8.1「如广播消息」）。
-	// 锁序注意：store.mu 不与 ss.mu 嵌套持有（store.drop 是 store.mu→ss.mu，
-	// 此处先快照后逐会话取锁，无交叉）。
+	// 锁序注意：store.mu 不与 ss.mu 嵌套持有（store.drop 先释放 store.mu
+	// 再由 terminate 取 ss.mu，此处先快照后逐会话取锁，无交叉）。
 	s.store.mu.Lock()
 	sessions := make([]*serverSession, 0, len(s.store.sessions))
 	for _, ss := range s.store.sessions {
@@ -379,6 +379,7 @@ type serverSession struct {
 
 	mu            sync.Mutex
 	conn          *serverConn
+	lastConn      *serverConn // 最近一次绑定的连接（断开后供流迁移/终结）
 	subs          map[uint32]string
 	retained      map[uint32][]*Frame
 	retainedBytes int
@@ -419,7 +420,25 @@ func (ss *serverSession) bind(sc *serverConn) {
 		// 同会话新连接顶替：废弃旧连接（重连风暴下的 takeover 惯例）。
 		ss.conn.ep.tr.kill(errors.New("session taken over by newer connection"))
 	}
+	// 迁移仍然活跃的 responder 流（客户端发起，奇数 ID）到新连接的
+	// endpoint（protocol.md §8.1「未终结流」跨恢复存活）：迁移后客户端
+	// 的上行帧（通道数据/CANCEL/额度回授）在新流表命中，handler 不再
+	// 悬空。服务端发起的流（偶数 ID）随旧连接消亡，不迁移。迁移必须在
+	// tr.start 之前完成，新连接上任何入站帧都晚于流表就绪。
+	src := ss.conn
+	if src == nil {
+		src = ss.lastConn
+	}
+	if src != nil && src != sc {
+		for id, flw := range src.ep.snapshot() {
+			if id%2 == 1 && !flw.isDone() {
+				flw.setEndpoint(sc.ep)
+				sc.ep.registerFlow(flw)
+			}
+		}
+	}
 	ss.conn = sc
+	ss.lastConn = sc
 	if ss.timer != nil {
 		ss.timer.Stop()
 		ss.timer = nil
@@ -473,14 +492,42 @@ func (st *sessionStore) take(id string) *serverSession {
 
 func (st *sessionStore) drop(id string) {
 	st.mu.Lock()
-	defer st.mu.Unlock()
-	if ss, ok := st.sessions[id]; ok {
-		ss.mu.Lock()
-		if ss.timer != nil {
-			ss.timer.Stop()
-			ss.timer = nil
-		}
-		ss.mu.Unlock()
+	ss, ok := st.sessions[id]
+	if ok {
 		delete(st.sessions, id)
+	}
+	st.mu.Unlock()
+	if ok {
+		ss.terminate()
+	}
+}
+
+// terminate 会话终结（保留期到/禁用保留/溢出后由重连走新会话）：fail
+// 会话上仍然活跃的 responder 流——handler 的 ctx() 随之取消，应用 handler
+// 得以退出；否则会话离开 store 后无人再能取消它们，handler 连同它们的
+// 下行产出一起悬挂。锁序：store.mu 与 ss.mu 顺序获取不嵌套，ss.mu 与
+// ep.streamsMu 单向（ss.mu → streamsMu）。
+func (ss *serverSession) terminate() {
+	ss.mu.Lock()
+	if ss.timer != nil {
+		ss.timer.Stop()
+		ss.timer = nil
+	}
+	src := ss.conn
+	if src == nil {
+		src = ss.lastConn
+	}
+	var flows []*flow
+	if src != nil {
+		for id, flw := range src.ep.snapshot() {
+			if id%2 == 1 && !flw.isDone() {
+				flows = append(flows, flw)
+			}
+		}
+	}
+	ss.mu.Unlock()
+	expired := &Error{Code: CodeSessionExpired, Message: "session terminated"}
+	for _, flw := range flows {
+		flw.fail(expired)
 	}
 }

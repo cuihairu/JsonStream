@@ -532,6 +532,146 @@ func TestSubscriptionSurvivesResume(t *testing.T) {
 	}
 }
 
+// TestChannelSurvivesResume：通道流跨会话恢复双向打通。服务端 bind 迁移
+// responder 流表后，客户端上行的通道数据帧在新连接命中迁移流，handler
+// 持续收发；CANCEL 同样随迁移传播——服务端 handler 以 CANCELLED 退出，
+// 而不是悬空到会话终结。
+func TestChannelSurvivesResume(t *testing.T) {
+	handlerDone := make(chan error, 1)
+	_, addr := startTestServer(t, shortConfig(), func(s *Server) {
+		s.HandleChannel("dup", func(ch *Channel) error {
+			err := func() error {
+				for {
+					m, err := ch.Receive(context.Background())
+					if err != nil {
+						return err
+					}
+					var it item
+					if err := m.Decode(&it); err != nil {
+						return err
+					}
+					if err := ch.Send(item{N: it.N}); err != nil {
+						return err
+					}
+				}
+			}()
+			handlerDone <- err
+			return err
+		})
+	})
+
+	cfg := shortConfig()
+	c := dialTest(t, addr, cfg)
+	reconnected := make(chan struct{}, 4)
+	c.OnReconnect(func() { reconnected <- struct{}{} })
+
+	ch, err := c.Channel(context.Background(), "dup", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := c.SessionID()
+	if err := ch.Send(item{N: 1}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := ch.Receive(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var it item
+	if err := m.Decode(&it); err != nil || it.N != 1 {
+		t.Fatalf("first echo = %+v err=%v", it, err)
+	}
+
+	// 掐断底层连接，等服务端转入会话保留后自动重连恢复。
+	c.mu.Lock()
+	tr := c.ep.tr
+	c.mu.Unlock()
+	tr.kill(errors.New("simulated network failure"))
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-reconnected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("client did not reconnect")
+	}
+	if c.SessionID() != sid {
+		t.Fatalf("session id changed: %s -> %s (resume failed)", sid, c.SessionID())
+	}
+
+	// 修复实锤：resume 后通道继续双向工作——上行帧必须命中服务端迁移流。
+	if err := ch.Send(item{N: 2}); err != nil {
+		t.Fatalf("send after resume: %v", err)
+	}
+	m, err = ch.Receive(context.Background())
+	if err != nil {
+		t.Fatalf("receive after resume: %v", err)
+	}
+	if err := m.Decode(&it); err != nil || it.N != 2 {
+		t.Fatalf("echo after resume = %+v err=%v", it, err)
+	}
+
+	// CANCEL 随迁移传播：服务端 handler 以 CANCELLED 退出。
+	if err := ch.Cancel(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-handlerDone:
+		var je *Error
+		if !errors.As(err, &je) || je.Code != CodeCancelled {
+			t.Fatalf("server handler exit = %v, want CANCELLED", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server channel handler not cancelled after resume")
+	}
+}
+
+// TestSessionDropCancelsHandlers：会话终结（Retention=-1 断开即 drop）时，
+// 服务端仍在执行的 responder handler 以 SESSION_EXPIRED 收尾——会话离开
+// store 后无人再能取消它们，handler 连同其下行产出一起悬挂。
+func TestSessionDropCancelsHandlers(t *testing.T) {
+	handlerDone := make(chan error, 1)
+	_, addr := startTestServer(t, func() Config {
+		cfg := shortConfig()
+		cfg.Retention = -1
+		return cfg
+	}(), func(s *Server) {
+		s.HandleStream("endless", func(_ *Request, em Emitter) error {
+			for i := 0; ; i++ {
+				if err := em.Emit(item{N: i}); err != nil {
+					handlerDone <- err
+					return err
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		})
+	})
+
+	cfg := shortConfig()
+	c := dialTest(t, addr, cfg)
+	stream, err := c.Stream(context.Background(), "endless", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := stream.Next(context.Background()); !ok {
+		t.Fatal("no first stream frame")
+	}
+
+	// 断开：服务端 unbind 在 Retention=-1 下立即 drop 会话并取消 handler。
+	c.mu.Lock()
+	tr := c.ep.tr
+	c.mu.Unlock()
+	tr.kill(errors.New("simulated network failure"))
+
+	select {
+	case err := <-handlerDone:
+		var je *Error
+		if !errors.As(err, &je) || je.Code != CodeSessionExpired {
+			t.Fatalf("server handler exit = %v, want SESSION_EXPIRED", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server handler not cancelled after session drop")
+	}
+}
+
 // TestResumeExpiredFailsPendingAndResubscribes：会话恢复失败（服务端禁用
 // 保留）时：挂起请求以 SESSION_EXPIRED 失败、OnResumeFailed 触发、订阅自动
 // 重订后广播继续可达。
