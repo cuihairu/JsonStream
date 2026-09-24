@@ -63,7 +63,7 @@ func (s *Server) HandleOneWay(route string, h func(*Message) error) { s.table.Ha
 func (s *Server) HandlePublish(topic string, h func(*Message) error) { s.table.HandlePublish(topic, h) }
 
 // OnAuth 注册握手鉴权钩子；返回非 nil error 时以 AUTH_DENIED 拒绝连接。
-func (s *Server) OnAuth(h func(*connectJSON) error) { s.table.OnAuth(h) }
+func (s *Server) OnAuth(h func(*ConnectJSON) error) { s.table.OnAuth(h) }
 
 // Publish 向所有已订阅该主题的连接广播一帧 PUBLISH。
 func (s *Server) Publish(topic string, payload any) error {
@@ -225,7 +225,7 @@ func (s *Server) handleConn(nc net.Conn) {
 		_ = writeOnce(nc, errorFrame(0, &Error{Code: CodeProtocol, Message: "expected CONNECT"}))
 		return
 	}
-	var cj connectJSON
+	var cj ConnectJSON
 	if err := json.Unmarshal(hf.Payload, &cj); err != nil {
 		_ = writeOnce(nc, errorFrame(0, &Error{Code: CodeInvalid, Message: "bad CONNECT payload"}))
 		return

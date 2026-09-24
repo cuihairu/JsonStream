@@ -274,7 +274,7 @@ func (c *Client) dialTCP() (net.Conn, error) {
 // establish 发送 CONNECT、等待 CONNACK，并用生效参数构建 transport 与 endpoint。
 func (c *Client) establish(conn net.Conn) (*transport, error) {
 	_ = conn.SetDeadline(time.Now().Add(c.cfg.DialTimeout))
-	cj := &connectJSON{
+	cj := &ConnectJSON{
 		Version:     int(ProtocolVersion),
 		Compress:    c.cfg.Compress,
 		Encrypt:     c.cfg.Encrypt,

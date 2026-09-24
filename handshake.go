@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-// connectJSON 是 CONNECT 帧的 payload：客户端能力声明与恢复凭证。
-type connectJSON struct {
+// ConnectJSON 是 CONNECT 帧的 payload：客户端能力声明与恢复凭证。
+type ConnectJSON struct {
 	Version     int    `json:"version"`
 	Compress    bool   `json:"compress"`
 	Encrypt     bool   `json:"encrypt"`
@@ -30,7 +30,7 @@ type connackJSON struct {
 
 // 握手帧（CONNECT/CONNACK/握手期 ERROR）恒为明文：协商完成之前
 // 双方无从得知对方是否启用了压缩/加密。
-func connectFrame(cj *connectJSON) (*Frame, error) {
+func connectFrame(cj *ConnectJSON) (*Frame, error) {
 	data, err := jsonMarshal(cj)
 	if err != nil {
 		return nil, err
@@ -48,7 +48,7 @@ func connackFrame(aj *connackJSON) (*Frame, error) {
 
 // effectiveConnack 计算生效参数：以服务端配置为上限、客户端声明为请求
 // （protocol.md §6.1）。credit 双方都 > 0 才启用，取较小值。
-func effectiveConnack(srvCfg Config, cj *connectJSON) connackJSON {
+func effectiveConnack(srvCfg Config, cj *ConnectJSON) connackJSON {
 	aj := connackJSON{
 		Resumed:     false,
 		Compress:    srvCfg.Compress && cj.Compress,

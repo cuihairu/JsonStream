@@ -17,7 +17,7 @@ type routeTable struct {
 	channels map[string]func(*Channel) error
 	oneways  map[string]func(*Message) error
 	topics   map[string]func(*Message) error
-	auth     func(*connectJSON) error
+	auth     func(*ConnectJSON) error
 }
 
 type routeEntry struct {
@@ -71,7 +71,7 @@ func (t *routeTable) HandlePublish(topic string, h func(*Message) error) {
 }
 
 // OnAuth 注册握手鉴权钩子；返回 error 时以该错误拒绝连接。
-func (t *routeTable) OnAuth(h func(*connectJSON) error) {
+func (t *routeTable) OnAuth(h func(*ConnectJSON) error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.auth = h
