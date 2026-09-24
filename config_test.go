@@ -14,10 +14,14 @@ func TestConfigNormalizedDefaults(t *testing.T) {
 		t.Fatalf("zero config not fully defaulted: %+v", got)
 	}
 
-	// 心跳下限钳制：过激配置不允许把连接打挂
+	// 心跳下限钳制：过激配置不允许把连接打挂；负值与过激同路径
 	clamped := (&Config{Heartbeat: time.Millisecond}).normalized()
 	if clamped.Heartbeat != time.Second {
 		t.Fatalf("aggressive heartbeat = %v, want clamped to 1s", clamped.Heartbeat)
+	}
+	negative := (&Config{Heartbeat: -time.Second}).normalized()
+	if negative.Heartbeat != time.Second {
+		t.Fatalf("negative heartbeat = %v, want clamped to 1s", negative.Heartbeat)
 	}
 
 	// 原配置不被修改；已设置的字段原样保留

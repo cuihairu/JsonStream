@@ -2521,3 +2521,51 @@ func TestZeroValueConfigDial(t *testing.T) {
 		t.Fatal("empty session id")
 	}
 }
+
+// TestNegativeCreditDisablesBackpressure：Credit 负值与 0 同义——协商
+// 条件是双方 >0，任一侧非正即整体关闭背压。钉住该行为防止将来把
+// 「非正」误当非法输入（如钳为 1）或让 take 在负窗口上永久阻塞。
+func TestNegativeCreditDisablesBackpressure(t *testing.T) {
+	cfg := shortConfig()
+	cfg.Credit = -1
+	_, addr := startTestServer(t, cfg, func(s *Server) {
+		s.Handle("echo", func(req *Request) (any, error) {
+			var it item
+			if err := req.Decode(&it); err != nil {
+				return nil, err
+			}
+			return item{N: it.N * 2}, nil
+		})
+		s.HandleStream("range", func(req *Request, em Emitter) error {
+			var it item
+			if err := req.Decode(&it); err != nil {
+				return err
+			}
+			for i := 0; i < it.N; i++ {
+				if err := em.Emit(item{N: i}); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	})
+	c := dialTest(t, addr, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := c.Request(ctx, "echo", item{N: 21}); err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	st, err := c.Stream(ctx, "range", item{N: 8})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	for want := 0; want < 8; want++ {
+		if _, ok := st.Next(ctx); !ok {
+			t.Fatalf("stream ended at %d: %v", want, st.Err())
+		}
+	}
+	if err := st.Err(); err != nil {
+		t.Fatalf("stream err: %v", err)
+	}
+	c.Close()
+}

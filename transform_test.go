@@ -55,3 +55,30 @@ func TestTransformerNonceReadError(t *testing.T) {
 		t.Fatal("expected nonce error")
 	}
 }
+
+// TestTransformInboundUnsupportedFlags：对端启用了压缩/加密而本端未启用
+// 时，入站必须显式拒绝并报 UNSUPPORTED——静默当明文解会产出乱码帧，
+// 静默丢弃则破坏流语义，显式错误码是唯一正确行为。双标志场景验证
+// 判定顺序：先加密后压缩，报先命中的那条。
+func TestTransformInboundUnsupportedFlags(t *testing.T) {
+	plain, err := newTransformer(&Config{}) // 压缩/加密全关
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		flag uint8
+		data []byte
+	}{
+		{"encrypted while disabled", FlagEncrypted, bytes.Repeat([]byte{0}, 40)},
+		{"compressed while disabled", FlagCompressed, []byte("whatever")},
+		{"both while disabled", FlagEncrypted | FlagCompressed, []byte("x")},
+	}
+	for _, tc := range cases {
+		_, err := plain.inbound(tc.flag, tc.data)
+		var je *Error
+		if !errors.As(err, &je) || je.Code != CodeUnsupported {
+			t.Fatalf("%s: want UNSUPPORTED, got %v", tc.name, err)
+		}
+	}
+}

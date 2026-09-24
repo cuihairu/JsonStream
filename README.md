@@ -151,7 +151,7 @@ Stream ID 按发起方分奇偶（客户端奇数、服务端偶数），和 HTT
 
 ### 测试与质量结果
 
-- 语句覆盖率 **100%**（1206/1206，`go test -coverprofile` 实测），149 个测试函数（含 3 个 fuzz 靶），覆盖契约、集成、并发时序构造。
+- 语句覆盖率 **100%**（1206/1206，`go test -coverprofile` 实测），155 个测试函数（含 3 个 fuzz 靶），覆盖契约、集成、并发时序构造。
 - `-race -count=3` 全绿；goroutine 泄漏守卫（20 并发客户端回归基线 ±2）。
 - 三条 fuzz 靶（帧解析/变换层/握手状态机）长跑累计千万级 execs 零 crash，实锤修复 2 个真 bug（上文 1、2）。
 - 六件静态检查零告警：staticcheck、vet、gofmt、revive、gosec、gocritic；govulncheck 零可触达漏洞；nilness 零告警。

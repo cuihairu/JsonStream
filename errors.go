@@ -12,7 +12,7 @@ const (
 	CodeInvalid        ErrorCode = 3  // INVALID: 载荷或参数非法
 	CodeProtocol       ErrorCode = 4  // PROTOCOL: 协议违规（必须断开连接）
 	CodeCancelled      ErrorCode = 5  // CANCELLED: 对端已取消
-	CodeTimeout        ErrorCode = 6  // TIMEOUT: 处理超时
+	CodeTimeout        ErrorCode = 6  // TIMEOUT: 处理超时（v1 预留：实现未内置处理超时，无产生路径）
 	CodeAuthDenied     ErrorCode = 7  // AUTH_DENIED: 鉴权失败 / 拒绝连接
 	CodeSessionExpired ErrorCode = 8  // SESSION_EXPIRED: 会话过期，恢复失败
 	CodeBusy           ErrorCode = 9  // BUSY: 过载拒绝（含保留队列溢出）
