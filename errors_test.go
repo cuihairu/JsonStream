@@ -41,3 +41,13 @@ func TestErrorStringAndClassification(t *testing.T) {
 		t.Fatalf("unknown code should render UNKNOWN, got %q", got)
 	}
 }
+
+// errDecode 的兜底：载荷损坏或缺少错误码时归一为 INTERNAL（§7.10）。
+func TestErrDecodeFallback(t *testing.T) {
+	for _, payload := range [][]byte{[]byte(`not json`), []byte(`{"message":"no code"}`), nil} {
+		e := errDecode(payload)
+		if e.Code != CodeInternal || e.Message != "undecodable error payload" {
+			t.Fatalf("errDecode(%q) = %+v, want INTERNAL fallback", payload, e)
+		}
+	}
+}

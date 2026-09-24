@@ -289,3 +289,30 @@ func TestHandshakeVersionMismatch(t *testing.T) {
 		t.Fatalf("want ERROR(PROTOCOL), got %s", got.Type)
 	}
 }
+
+// appendTo 拒绝超上限的元数据（编码侧的对称校验，§2）。
+func TestFrameAppendToMetadataTooLarge(t *testing.T) {
+	f := &Frame{Header: Header{Version: ProtocolVersion}, Metadata: make([]byte, MaxMetadataSize+1)}
+	if _, err := f.appendTo(nil); err == nil {
+		t.Fatal("appendTo must reject metadata beyond the cap")
+	}
+}
+
+// 帧头声称带元数据但流在 metaLen 段前截断。
+func TestFrameReadTruncatedMetaLength(t *testing.T) {
+	f := &Frame{Header: Header{Version: ProtocolVersion, Flags: FlagHasMeta, Type: TypePing}}
+	buf, err := f.appendTo(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFrame(bytes.NewReader(buf[:headerSize])); err == nil {
+		t.Fatal("truncated meta length must be rejected")
+	}
+}
+
+// 空 route + 空 topic 的元数据不占线上的 meta 段。
+func TestEncodeMetaEmpty(t *testing.T) {
+	if b := encodeMeta("", ""); b != nil {
+		t.Fatalf("encodeMeta(\"\",\"\") = %q, want nil", b)
+	}
+}
