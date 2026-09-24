@@ -142,8 +142,7 @@ func (flw *flow) ack() {
 
 // ReadStream 是流式响应（Flags.Stream）的读取端。
 type ReadStream struct {
-	f  *flow
-	ep *endpoint
+	f *flow
 }
 
 // Next 返回下一帧；正常结束（COMPLETE/CANCEL）返回 false 且 Err() 为 nil，
@@ -193,12 +192,14 @@ func (s *ReadStream) Err() error {
 	return s.f.err
 }
 
-// Cancel 取消流：发 CANCEL 并本地终结。
+// Cancel 取消流：发 CANCEL 并本地终结。帧经 f.ep 发送——会话恢复迁移后
+// f.ep 是当前连接，构造时的 endpoint 已死（陈旧 ep 引用只会让 CANCEL 静默
+// 丢失，对端 handler 永远收不到取消）。
 func (s *ReadStream) Cancel() error {
 	if s == nil || s.f.isDone() {
 		return nil
 	}
-	_ = s.ep.tr.send(&Frame{Header: Header{Version: ProtocolVersion, Type: TypeCancel, StreamID: s.f.id}})
+	_ = s.f.ep.tr.send(&Frame{Header: Header{Version: ProtocolVersion, Type: TypeCancel, StreamID: s.f.id}})
 	s.f.fail(&Error{Code: CodeCancelled, Message: "cancelled by caller"})
 	return nil
 }
@@ -210,11 +211,11 @@ func (s *ReadStream) Cancel() error {
 // Cancel 立即终结整条流。
 type Channel struct {
 	f   *flow
-	ep  *endpoint
 	ctx context.Context
 }
 
 // Send 发送一帧（受背压约束；额度耗尽时阻塞直到补充或 ctx/流终结）。
+// 出站一律经 f.ep：会话恢复迁移后 f.ep 是当前连接，构造时的 endpoint 已死。
 func (c *Channel) Send(v any) error {
 	data, err := jsonMarshal(v)
 	if err != nil {
@@ -223,10 +224,10 @@ func (c *Channel) Send(v any) error {
 	if c.f.isDone() {
 		return ErrClosed
 	}
-	if err := c.ep.tr.takeCredit(c.ctx); err != nil {
+	if err := c.f.ep.tr.takeCredit(c.ctx); err != nil {
 		return err
 	}
-	return c.ep.emit(&Frame{
+	return c.f.ep.emit(&Frame{
 		Header:  Header{Version: ProtocolVersion, Type: TypeResponse, StreamID: c.f.id},
 		Payload: data,
 	})
@@ -263,7 +264,7 @@ func (c *Channel) Close() error {
 	if c.f.isDone() {
 		return nil
 	}
-	_ = c.ep.emit(completeFrame(c.f.id))
+	_ = c.f.ep.emit(completeFrame(c.f.id))
 	c.f.complete()
 	return nil
 }
@@ -273,7 +274,7 @@ func (c *Channel) Cancel() error {
 	if c.f.isDone() {
 		return nil
 	}
-	_ = c.ep.tr.send(&Frame{Header: Header{Version: ProtocolVersion, Type: TypeCancel, StreamID: c.f.id}})
+	_ = c.f.ep.tr.send(&Frame{Header: Header{Version: ProtocolVersion, Type: TypeCancel, StreamID: c.f.id}})
 	c.f.fail(&Error{Code: CodeCancelled, Message: "cancelled"})
 	return nil
 }
@@ -283,7 +284,6 @@ func (c *Channel) Cancel() error {
 // Subscription 是一条主题订阅。回调错误只记日志不回帧（投递方向上
 // 回应会形成"响应的响应"，见 docs/protocol.md §7.8）。
 type Subscription struct {
-	ep    *endpoint
 	topic string
 	h     func(*Message) error
 
@@ -307,7 +307,7 @@ func (s *Subscription) consume() {
 		case frm := <-f.frames:
 			f.release(1)
 			if err := s.h(toMessage(frm)); err != nil {
-				s.ep.log.Printf("jsonstream: subscription %q callback error: %v", s.topic, err)
+				f.ep.log.Printf("jsonstream: subscription %q callback error: %v", s.topic, err)
 			}
 		case <-f.doneCh:
 			// 排空终结前已入队的余帧后再退出。
@@ -316,7 +316,7 @@ func (s *Subscription) consume() {
 				case frm := <-f.frames:
 					f.release(1)
 					if err := s.h(toMessage(frm)); err != nil {
-						s.ep.log.Printf("jsonstream: subscription %q callback error: %v", s.topic, err)
+						f.ep.log.Printf("jsonstream: subscription %q callback error: %v", s.topic, err)
 					}
 				default:
 					return
@@ -326,14 +326,16 @@ func (s *Subscription) consume() {
 	}
 }
 
-// Close 退订：发 UNSUBSCRIBE 并终结本地流。
+// Close 退订：发 UNSUBSCRIBE 并终结本地流。帧必须经 f.ep 发送——会话
+// 恢复后 f 已随订阅流迁移到新 endpoint，s.ep 仍是创建时的旧连接，从它
+// 发送只会得到 ErrClosed，退订帧静默丢失（服务端永远摘不掉该订阅）。
 func (s *Subscription) Close() error {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
 		f := s.f
 		s.mu.Unlock()
 		if f != nil {
-			_ = s.ep.tr.send(&Frame{
+			_ = f.ep.tr.send(&Frame{
 				Header:   Header{Version: ProtocolVersion, Type: TypeUnsubscribe, StreamID: f.id},
 				Metadata: encodeMeta("", s.topic),
 			})

@@ -555,14 +555,14 @@ func TestClientResubscribeFailurePaths(t *testing.T) {
 	}
 	tr.kill(ErrClosed)
 	c := &Client{cfg: shortConfig(), table: newRouteTable()}
-	c.resubscribeLocked(ep, &Subscription{ep: ep, topic: "t"})
+	c.resubscribeLocked(ep, &Subscription{topic: "t"})
 	if n := len(ep.snapshot()); n != 0 {
 		t.Fatalf("failed resubscribe left %d flows", n)
 	}
 
 	// 流被对端终结（ERROR 先于 SUBACK）→ 放弃重订
 	ep2, _ := newTestEndpoint(t, true, nil)
-	sub2 := &Subscription{ep: ep2, topic: "t"}
+	sub2 := &Subscription{topic: "t"}
 	done := make(chan struct{})
 	go func() {
 		c.resubscribeLocked(ep2, sub2)
@@ -584,7 +584,7 @@ func TestClientResubscribeFailurePaths(t *testing.T) {
 	orig := resubAckTimeout
 	resubAckTimeout = 30 * time.Millisecond
 	defer func() { resubAckTimeout = orig }()
-	c.resubscribeLocked(ep3, &Subscription{ep: ep3, topic: "slow"})
+	c.resubscribeLocked(ep3, &Subscription{topic: "slow"})
 	log.waitFor(t, 1)
 }
 

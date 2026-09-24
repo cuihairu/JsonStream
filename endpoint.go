@@ -311,7 +311,7 @@ func (ep *endpoint) runRequest(flw *flow, f *Frame) {
 // runChannel 运行双工通道 handler；handler 返回视为本端发完，补发
 // COMPLETE（若 handler 已 Close 则幂等）。
 func (ep *endpoint) runChannel(flw *flow) {
-	ch := &Channel{f: flw, ep: ep, ctx: flw.ctx()}
+	ch := &Channel{f: flw, ctx: flw.ctx()}
 	if err := flw.chEntry(ch); err != nil {
 		_ = ep.emit(errorFrame(flw.id, asStreamError(err)))
 		flw.finish(nil)
@@ -392,7 +392,7 @@ func (ep *endpoint) doStream(_ context.Context, route string, payload any) (*Rea
 		ep.unregisterFlow(flw)
 		return nil, err
 	}
-	return &ReadStream{f: flw, ep: ep}, nil
+	return &ReadStream{f: flw}, nil
 }
 
 // doChannel 发起双工通道。
@@ -407,7 +407,7 @@ func (ep *endpoint) doChannel(ctx context.Context, route string, payload any) (*
 		ep.unregisterFlow(flw)
 		return nil, err
 	}
-	return &Channel{f: flw, ep: ep, ctx: ctx}, nil
+	return &Channel{f: flw, ctx: ctx}, nil
 }
 
 // doOneWay 单向发送；协议保证不产生任何响应帧。
@@ -447,7 +447,7 @@ func (ep *endpoint) doSubscribe(ctx context.Context, topic string, h func(*Messa
 		flw.fail(&Error{Code: CodeCancelled, Message: ctx.Err().Error()})
 		return nil, ctx.Err()
 	}
-	sub := &Subscription{ep: ep, topic: topic, h: h}
+	sub := &Subscription{topic: topic, h: h}
 	sub.mu.Lock()
 	sub.f = flw
 	sub.mu.Unlock()

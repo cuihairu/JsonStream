@@ -478,7 +478,7 @@ func TestReadStreamTerminalRaces(t *testing.T) {
 	for i := 0; i < 20; i++ { // 双就绪随机：多轮迭代保证两入口都被走到
 		flw := newFlow(ep.allocID(), flowStream, ep)
 		ep.registerFlow(flw)
-		s := &ReadStream{f: flw, ep: ep}
+		s := &ReadStream{f: flw}
 		flw.frames <- testFrame(TypeResponse, flw.id, 0, "", "", []byte(`{}`))
 		flw.fail(&Error{Code: CodeCancelled, Message: "cancelled by peer"})
 		if m, ok := s.Next(context.Background()); m != nil || ok {
@@ -488,7 +488,7 @@ func TestReadStreamTerminalRaces(t *testing.T) {
 	var e *Error
 	flw := newFlow(1, flowStream, ep)
 	ep.registerFlow(flw)
-	s := &ReadStream{f: flw, ep: ep}
+	s := &ReadStream{f: flw}
 	flw.fail(&Error{Code: CodeCancelled, Message: "cancelled by peer"})
 	if !errors.As(s.Err(), &e) || e.Code != CodeCancelled {
 		t.Fatalf("Err = %v, want CANCELLED", s.Err())
@@ -497,7 +497,7 @@ func TestReadStreamTerminalRaces(t *testing.T) {
 	// ctx 取消 → 本地发 CANCEL 并终结流
 	flw2 := newFlow(3, flowStream, ep)
 	ep.registerFlow(flw2)
-	s2 := &ReadStream{f: flw2, ep: ep}
+	s2 := &ReadStream{f: flw2}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if m, ok := s2.Next(ctx); m != nil || ok {
@@ -513,7 +513,7 @@ func TestReadStreamCancelAfterDone(t *testing.T) {
 	ep, _ := newTestEndpoint(t, true, nil)
 	flw := newFlow(1, flowStream, ep)
 	ep.registerFlow(flw)
-	s := &ReadStream{f: flw, ep: ep}
+	s := &ReadStream{f: flw}
 	flw.complete()
 	if err := s.Cancel(); err != nil {
 		t.Fatalf("Cancel on finished stream = %v, want nil", err)
@@ -523,7 +523,7 @@ func TestReadStreamCancelAfterDone(t *testing.T) {
 // Channel.Send 的两个错误出口：编码失败；信用闸门随连接关闭。
 func TestChannelSendErrors(t *testing.T) {
 	ep, tr := newTestEndpoint(t, true, func(c *Config) { c.Credit = 4 })
-	ch := &Channel{f: newFlow(1, flowChannel, ep), ep: ep, ctx: context.Background()}
+	ch := &Channel{f: newFlow(1, flowChannel, ep), ctx: context.Background()}
 
 	if err := ch.Send(make(chan int)); err == nil {
 		t.Fatal("expected marshal error")
@@ -543,7 +543,7 @@ func TestChannelReceiveTerminal(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		flw := newFlow(ep.allocID(), flowChannel, ep)
 		ep.registerFlow(flw)
-		ch := &Channel{f: flw, ep: ep, ctx: context.Background()}
+		ch := &Channel{f: flw, ctx: context.Background()}
 		flw.frames <- testFrame(TypeResponse, flw.id, 0, "", "", []byte(`{}`))
 		flw.fail(&Error{Code: CodeCancelled, Message: "x"})
 		if m, err := ch.Receive(context.Background()); m != nil || err == nil {
@@ -554,7 +554,7 @@ func TestChannelReceiveTerminal(t *testing.T) {
 	// ctx 取消
 	flw2 := newFlow(3, flowChannel, ep)
 	ep.registerFlow(flw2)
-	ch2 := &Channel{f: flw2, ep: ep}
+	ch2 := &Channel{f: flw2}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := ch2.Receive(ctx); !errors.Is(err, context.Canceled) {
@@ -565,7 +565,7 @@ func TestChannelReceiveTerminal(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		flw3 := newFlow(ep.allocID(), flowChannel, ep)
 		ep.registerFlow(flw3)
-		ch3 := &Channel{f: flw3, ep: ep}
+		ch3 := &Channel{f: flw3}
 		flw3.frames <- testFrame(TypeResponse, flw3.id, 0, "", "", []byte(`{"n":1}`))
 		flw3.complete()
 		m, err := ch3.Receive(context.Background())
@@ -581,7 +581,7 @@ func TestChannelReceiveTerminal(t *testing.T) {
 // Cancel 幂等：第二次调用是 no-op。
 func TestChannelCancelIdempotent(t *testing.T) {
 	ep, _ := newTestEndpoint(t, true, nil)
-	ch := &Channel{f: newFlow(1, flowChannel, ep), ep: ep, ctx: context.Background()}
+	ch := &Channel{f: newFlow(1, flowChannel, ep), ctx: context.Background()}
 	if err := ch.Cancel(); err != nil {
 		t.Fatal(err)
 	}
@@ -593,9 +593,8 @@ func TestChannelCancelIdempotent(t *testing.T) {
 // ---- 订阅消费 ----
 
 // f == nil 的订阅（构造期）直接退出消费循环。
-func TestSubscriptionConsumeNilFlow(t *testing.T) {
-	ep, _ := newTestEndpoint(t, true, nil)
-	sub := &Subscription{ep: ep, topic: "t"}
+func TestSubscriptionConsumeNilFlow(_ *testing.T) {
+	sub := &Subscription{topic: "t"}
 	sub.consumeWg.Add(1)
 	sub.consume()
 	sub.consumeWg.Wait()
@@ -616,7 +615,7 @@ func TestSubscriptionCallbackErrorsLogged(t *testing.T) {
 	for i := 0; i < iterations; i++ {
 		flw := newFlow(ep.allocID(), flowSubscribe, ep)
 		ep.registerFlow(flw)
-		sub := &Subscription{ep: ep, topic: "t", h: h}
+		sub := &Subscription{topic: "t", h: h}
 		sub.mu.Lock()
 		sub.f = flw
 		sub.mu.Unlock()

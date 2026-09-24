@@ -398,6 +398,140 @@ func TestConsecutiveResumes(t *testing.T) {
 	}
 }
 
+// TestSubscriptionSurvivesResume：resume 成功路径的订阅保持（protocol.md
+// §8.1「订阅关系：重连后继续投递」）。断开期间的广播落进会话保留队列、
+// 重连后按序重放；之后的实时广播经服务端保留的订阅关系继续投递。全程
+// 无需重订——订阅流随会话迁移到新 endpoint（StreamID 不变、消费 goroutine
+// 不重启），与恢复失败路径的自动重订（TestResumeExpiredFailsPendingAnd-
+// Resubscribes）互为对照。
+func TestSubscriptionSurvivesResume(t *testing.T) {
+	var srv *Server
+	_, addr := startTestServer(t, shortConfig(), func(s *Server) { srv = s })
+
+	cfg := shortConfig()
+	c := dialTest(t, addr, cfg)
+	reconnected := make(chan struct{}, 4)
+	c.OnReconnect(func() { reconnected <- struct{}{} })
+
+	got := make(chan int, 8)
+	sub, err := c.Subscribe(context.Background(), "news", func(msg *Message) error {
+		var it item
+		if err := msg.Decode(&it); err != nil {
+			return err
+		}
+		got <- it.N
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := c.SessionID()
+
+	// 订阅生效：实时广播可达。
+	if err := srv.Publish("news", item{N: 1}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case n := <-got:
+		if n != 1 {
+			t.Fatalf("first broadcast = %d, want 1", n)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no first broadcast")
+	}
+
+	// 掐断底层连接；断开期间的发布应落进保留队列而非丢失。
+	c.mu.Lock()
+	tr := c.ep.tr
+	c.mu.Unlock()
+	tr.kill(errors.New("simulated network failure"))
+	time.Sleep(100 * time.Millisecond) // 等服务端感知断连、会话转入保留
+	for n := 2; n <= 4; n++ {
+		if err := srv.Publish("news", item{N: n}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 自动重连且会话成功恢复（SessionID 不变）。
+	select {
+	case <-reconnected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("client did not reconnect")
+	}
+	if c.SessionID() != sid {
+		t.Fatalf("session id changed: %s -> %s (resume failed)", sid, c.SessionID())
+	}
+
+	// 断开期间的广播按序重放，无需任何客户端动作。
+	for want := 2; want <= 4; want++ {
+		select {
+		case n := <-got:
+			if n != want {
+				t.Fatalf("replayed broadcast = %d, want %d", n, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("replayed broadcast %d missing", want)
+		}
+	}
+
+	// 之后的实时广播继续投递：服务端保留的订阅关系直接可用。
+	if err := srv.Publish("news", item{N: 5}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case n := <-got:
+		if n != 5 {
+			t.Fatalf("live broadcast after resume = %d, want 5", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("live broadcast after resume missing")
+	}
+
+	// 无需重订的直接证据：订阅仍持有原 StreamID 的流，且该流已随会话
+	// 迁移到重连后的新 endpoint（重订会分配新 ID 并重建流）。
+	c.mu.Lock()
+	newEp := c.ep
+	c.mu.Unlock()
+	sub.mu.Lock()
+	flw := sub.f
+	sub.mu.Unlock()
+	if flw.id%2 != 1 || flw.ep != newEp {
+		t.Fatalf("subscription flow not migrated: id=%d ep-migrated=%v", flw.id, flw.ep == newEp)
+	}
+
+	// 订阅对象继续可用：显式退订后广播不再送达。UNSUBSCRIBE 无应答帧，
+	// 轮询服务端订阅表确认摘除后再发布（否则发布可能赶在摘除前投递）。
+	if err := sub.Close(); err != nil {
+		t.Fatalf("unsubscribe after resume: %v", err)
+	}
+	dropDeadline := time.Now().Add(2 * time.Second)
+	for {
+		srv.store.mu.Lock()
+		var present bool
+		if ss, ok := srv.store.sessions[sid]; ok {
+			ss.mu.Lock()
+			_, present = ss.subs[flw.id]
+			ss.mu.Unlock()
+		}
+		srv.store.mu.Unlock()
+		if !present {
+			break
+		}
+		if time.Now().After(dropDeadline) {
+			t.Fatal("server did not drop subscription after unsubscribe")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if err := srv.Publish("news", item{N: 6}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case n := <-got:
+		t.Fatalf("broadcast %d delivered after unsubscribe", n)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
 // TestResumeExpiredFailsPendingAndResubscribes：会话恢复失败（服务端禁用
 // 保留）时：挂起请求以 SESSION_EXPIRED 失败、OnResumeFailed 触发、订阅自动
 // 重订后广播继续可达。
