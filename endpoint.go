@@ -381,7 +381,7 @@ func (ep *endpoint) doRequest(ctx context.Context, route string, payload any) (*
 }
 
 // doStream 发起流式请求。
-func (ep *endpoint) doStream(ctx context.Context, route string, payload any) (*ReadStream, error) {
+func (ep *endpoint) doStream(_ context.Context, route string, payload any) (*ReadStream, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err

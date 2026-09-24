@@ -65,12 +65,19 @@ func Dial(ctx context.Context, addr string, cfg Config) (*Client, error) {
 
 // ---- 路由注册（本端作为 responder：服务端主动发起交互时生效） ----
 
+// Handle 注册请求/响应处理器，应答服务端发起的 Request。
 func (c *Client) Handle(route string, h func(*Request) (any, error)) { c.table.Handle(route, h) }
+
+// HandleStream 注册服务端发起的流式处理器（Emitter 逐帧下发）。
 func (c *Client) HandleStream(route string, h func(*Request, Emitter) error) {
 	c.table.HandleStream(route, h)
 }
+
+// HandleChannel 注册双工通道处理器（双向多帧，Close 半关闭）。
 func (c *Client) HandleChannel(route string, h func(*Channel) error) { c.table.HandleChannel(route, h) }
-func (c *Client) HandleOneWay(route string, h func(*Message) error)  { c.table.HandleOneWay(route, h) }
+
+// HandleOneWay 注册单向消息处理器（无应答，错误仅记日志）。
+func (c *Client) HandleOneWay(route string, h func(*Message) error) { c.table.HandleOneWay(route, h) }
 
 // ---- 回调 ----
 

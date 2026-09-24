@@ -162,7 +162,7 @@ func FuzzRawPeer(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
-	srv.Handle("ping", func(req *Request) (any, error) { return item{N: 1}, nil })
+	srv.Handle("ping", func(_ *Request) (any, error) { return item{N: 1}, nil })
 	go srv.Serve()
 	f.Cleanup(func() { _ = srv.Close() })
 

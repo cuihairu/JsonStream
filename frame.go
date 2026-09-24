@@ -38,6 +38,7 @@ const (
 // FrameType 帧类型，见 docs/protocol.md §4。
 type FrameType uint8
 
+// 帧类型（§4）：未知类型一律 ERROR(PROTOCOL) 断开，为新能力演进留位。
 const (
 	TypeConnect     FrameType = 0x01
 	TypeConnAck     FrameType = 0x02

@@ -5,6 +5,7 @@ import "fmt"
 // ErrorCode 是错误帧 payload 中机器可读的错误分类，取值见 docs/protocol.md §7.10。
 type ErrorCode uint8
 
+// 错误码（§7.10）：线上取值即码值，名字映射见 ErrorCode.String。
 const (
 	CodeInternal       ErrorCode = 1  // INTERNAL: 处理器内部错误（含 handler panic）
 	CodeNotFound       ErrorCode = 2  // NOT_FOUND: 路由不存在

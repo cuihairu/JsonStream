@@ -88,7 +88,7 @@ func benchmarkRequestResponse(b *testing.B, cfg Config) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	srv.Handle("ping", func(req *Request) (any, error) { return item{N: 1}, nil })
+	srv.Handle("ping", func(_ *Request) (any, error) { return item{N: 1}, nil })
 	go func() { _ = srv.Serve() }()
 	defer srv.Close()
 

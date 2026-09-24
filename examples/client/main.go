@@ -33,7 +33,7 @@ func main() {
 	c.OnResumeFailed(func(err error) { log.Printf("session lost: %v; state rebuilt", err) })
 
 	// ---- 服务端主动发起：客户端作为 responder 注册 handler ----
-	c.Handle("client.time", func(req *jsonstream.Request) (any, error) {
+	c.Handle("client.time", func(_ *jsonstream.Request) (any, error) {
 		return map[string]string{"now": time.Now().Format(time.Kitchen)}, nil
 	})
 	c.HandleOneWay("client.notice", func(msg *jsonstream.Message) error {

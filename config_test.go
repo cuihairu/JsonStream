@@ -43,4 +43,4 @@ func TestConfigLogger(t *testing.T) {
 // capturedLogger 供 logger 路由断言使用。
 type capturedLogger struct{ msgs []string }
 
-func (c *capturedLogger) Printf(format string, v ...any) { c.msgs = append(c.msgs, format) }
+func (c *capturedLogger) Printf(format string, _ ...any) { c.msgs = append(c.msgs, format) }

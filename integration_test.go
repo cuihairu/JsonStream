@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"runtime"
 	"sync"
@@ -26,7 +27,7 @@ func TestHeartbeatKeepsIdleConnectionAlive(t *testing.T) {
 	cfg := shortConfig()
 	cfg.Heartbeat = 100 * time.Millisecond
 	_, addr := startTestServer(t, cfg, func(s *Server) {
-		s.Handle("ping", func(req *Request) (any, error) { return item{N: 1}, nil })
+		s.Handle("ping", func(_ *Request) (any, error) { return item{N: 1}, nil })
 	})
 	c := dialTest(t, addr, cfg)
 	time.Sleep(500 * time.Millisecond) // ≥ 4 个心跳周期
@@ -48,7 +49,7 @@ func TestTransportReadIdleTimeout(t *testing.T) {
 	defer c2.Close()
 	cfg := shortConfig()
 	cfg.Heartbeat = 50 * time.Millisecond
-	tr := newTransport(c1, c1, &transformer{}, &cfg, 0, func(f *Frame) error { return nil }, nil)
+	tr := newTransport(c1, c1, &transformer{}, &cfg, 0, func(_ *Frame) error { return nil }, nil)
 	tr.start()
 	// c2 保持沉默：既不发 PING 也不发业务帧。
 	select {
@@ -100,7 +101,7 @@ func TestSilentPeerDisconnectedByHeartbeat(t *testing.T) {
 func TestResumeReplaysPendingFrames(t *testing.T) {
 	continueCh := make(chan struct{})
 	_, addr := startTestServer(t, shortConfig(), func(s *Server) {
-		s.HandleStream("slow", func(req *Request, em Emitter) error {
+		s.HandleStream("slow", func(_ *Request, em Emitter) error {
 			for i := 1; i <= 2; i++ {
 				if err := em.Emit(item{N: i}); err != nil {
 					return err
@@ -191,7 +192,7 @@ func TestResumeExpiredFailsPendingAndResubscribes(t *testing.T) {
 		return cfg
 	}(), func(s *Server) {
 		srv = s
-		s.Handle("hang", func(req *Request) (any, error) {
+		s.Handle("hang", func(_ *Request) (any, error) {
 			<-blockCh // 挂起请求，制造断线时的 in-flight 流
 			return item{N: 1}, nil
 		})
@@ -354,17 +355,17 @@ func setupModeServer(t *testing.T) string {
 			}
 		})
 		// 4. 单向
-		s.HandleOneWay("notify", func(msg *Message) error {
+		s.HandleOneWay("notify", func(_ *Message) error {
 			return nil // 送达断言由 TestModeOneWay 独立完成
 		})
 		// 6. 错误
-		s.Handle("boom", func(req *Request) (any, error) {
+		s.Handle("boom", func(_ *Request) (any, error) {
 			return nil, &Error{Code: CodeBusy, Message: "overloaded on purpose"}
 		})
-		s.Handle("panic", func(req *Request) (any, error) {
+		s.Handle("panic", func(_ *Request) (any, error) {
 			panic("handler exploded")
 		})
-		s.Handle("plain-err", func(req *Request) (any, error) {
+		s.Handle("plain-err", func(_ *Request) (any, error) {
 			return nil, errors.New("plain failure")
 		})
 	})
@@ -468,8 +469,9 @@ func TestModeDuplex(t *testing.T) {
 	if err := ch.Close(); err != nil { // 半关闭：我说完了
 		t.Fatal(err)
 	}
-	if _, err := ch.Receive(ctx); !errors.Is(err, ErrClosed) && !errors.Is(err, context.DeadlineExceeded) {
-		// 本端已终结：Receive 立即返回（EOF 或关闭错误都算合理实现）
+	if _, err := ch.Receive(ctx); err != nil && !errors.Is(err, ErrClosed) &&
+		!errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, io.EOF) {
+		t.Fatalf("receive after terminal = %v, want ErrClosed/deadline/EOF", err)
 	}
 }
 
@@ -625,7 +627,7 @@ func TestBackpressureBlocksSender(t *testing.T) {
 	scfg := shortConfig()
 	scfg.Credit = window
 	_, addr := startTestServer(t, scfg, func(s *Server) {
-		s.HandleStream("firehose", func(req *Request, em Emitter) error {
+		s.HandleStream("firehose", func(_ *Request, em Emitter) error {
 			for i := 0; i < total; i++ {
 				if err := em.Emit(item{N: i}); err != nil {
 					return err
@@ -683,7 +685,7 @@ func TestNoBackpressureByDefault(t *testing.T) {
 	const total = 64
 	var emitted int32
 	_, addr := startTestServer(t, shortConfig(), func(s *Server) {
-		s.HandleStream("bulk", func(req *Request, em Emitter) error {
+		s.HandleStream("bulk", func(_ *Request, em Emitter) error {
 			for i := 0; i < total; i++ {
 				if err := em.Emit(item{N: i}); err != nil {
 					return err
@@ -897,7 +899,7 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv.Handle("ping", func(req *Request) (any, error) { return item{N: 1}, nil })
+	srv.Handle("ping", func(_ *Request) (any, error) { return item{N: 1}, nil })
 	go srv.Serve()
 
 	c, err := Dial(context.Background(), addr, cfg)
@@ -923,7 +925,7 @@ func TestReconnectAfterServerRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv2.Handle("ping", func(req *Request) (any, error) { return item{N: 2}, nil })
+	srv2.Handle("ping", func(_ *Request) (any, error) { return item{N: 2}, nil })
 	go srv2.Serve()
 	t.Cleanup(func() { _ = srv2.Close() })
 
@@ -965,7 +967,7 @@ func TestChannelHandlerError(t *testing.T) {
 			}
 			return &Error{Code: CodeInvalid, Message: "bad chat on purpose"}
 		})
-		s.Handle("ping", func(req *Request) (any, error) { return item{N: 1}, nil })
+		s.Handle("ping", func(_ *Request) (any, error) { return item{N: 1}, nil })
 	})
 	_ = srv
 	c := dialTest(t, addr, shortConfig())
@@ -999,7 +1001,7 @@ func TestChannelCancel(t *testing.T) {
 			srvFailed <- err
 			return nil
 		})
-		s.Handle("ping", func(req *Request) (any, error) { return item{N: 1}, nil })
+		s.Handle("ping", func(_ *Request) (any, error) { return item{N: 1}, nil })
 	})
 	_ = srv
 	c := dialTest(t, addr, shortConfig())
@@ -1046,7 +1048,7 @@ func TestCreditNegotiationTakesMin(t *testing.T) {
 	scfg := shortConfig()
 	scfg.Credit = 2
 	_, addr := startTestServer(t, scfg, func(s *Server) {
-		s.HandleStream("firehose", func(req *Request, em Emitter) error {
+		s.HandleStream("firehose", func(_ *Request, em Emitter) error {
 			for i := 0; i < total; i++ {
 				if err := em.Emit(item{N: i}); err != nil {
 					return err
@@ -1098,7 +1100,7 @@ func TestEncryptedCompressedEndToEnd(t *testing.T) {
 			var v map[string]any
 			return v, req.Decode(&v)
 		})
-		s.HandleStream("bulk", func(req *Request, em Emitter) error {
+		s.HandleStream("bulk", func(_ *Request, em Emitter) error {
 			for i := 0; i < 3; i++ {
 				if err := em.Emit(big); err != nil {
 					return err
@@ -1259,7 +1261,7 @@ func TestResumeOverflowedSessionStartsFresh(t *testing.T) {
 // 自动重连后反过来顶替 raw，业务恢复可用。
 func TestTakeoverKicksOldConnection(t *testing.T) {
 	_, addr := startTestServer(t, shortConfig(), func(s *Server) {
-		s.Handle("ping", func(req *Request) (any, error) { return item{N: 1}, nil })
+		s.Handle("ping", func(_ *Request) (any, error) { return item{N: 1}, nil })
 	})
 	c := dialTest(t, addr, shortConfig())
 	sid := c.SessionID()
@@ -1368,11 +1370,11 @@ func TestRetentionExpiryStartsFresh(t *testing.T) {
 func TestRequestContextTimeout(t *testing.T) {
 	block := make(chan struct{})
 	_, addr := startTestServer(t, shortConfig(), func(s *Server) {
-		s.Handle("hang", func(req *Request) (any, error) {
+		s.Handle("hang", func(_ *Request) (any, error) {
 			<-block
 			return item{N: 1}, nil
 		})
-		s.Handle("ping", func(req *Request) (any, error) { return item{N: 2}, nil })
+		s.Handle("ping", func(_ *Request) (any, error) { return item{N: 2}, nil })
 	})
 	c := dialTest(t, addr, shortConfig())
 

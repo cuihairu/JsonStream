@@ -98,7 +98,7 @@ func stubGCM(t *testing.T, key []byte, failCall int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	real, err := cipher.NewGCM(block)
+	realGCM, err := cipher.NewGCM(block)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func stubGCM(t *testing.T, key []byte, failCall int) {
 		if calls == failCall {
 			return nil, errors.New("gcm injected")
 		}
-		return real, nil
+		return realGCM, nil
 	}
 	t.Cleanup(func() { gcmNew = orig })
 }
@@ -158,7 +158,7 @@ func TestDialTransformerConstructionError(t *testing.T) {
 
 // 握手等待被 ctx 打断：Dial 返回 ctx.Err() 并关闭客户端。
 func TestDialContextCancel(t *testing.T) {
-	addr := startRawListener(t, func(c net.Conn) {
+	addr := startRawListener(t, func(_ net.Conn) {
 		time.Sleep(5 * time.Second) // 装聋作哑：握手停在等 CONNACK
 	})
 	cfg := shortConfig()
@@ -454,7 +454,7 @@ func TestClientResumeFailedSkipsServerInitiatedFlows(t *testing.T) {
 	srvCfg := shortConfig()
 	srvCfg.Retention = -1 // 断开即弃会话：重连必为全新会话（Resumed=false）
 	srv, addr := startTestServer(t, srvCfg, func(s *Server) {
-		s.Handle("slow", func(req *Request) (any, error) {
+		s.Handle("slow", func(_ *Request) (any, error) {
 			<-releaseServer
 			return item{N: 1}, nil
 		})
@@ -465,7 +465,7 @@ func TestClientResumeFailedSkipsServerInitiatedFlows(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { c.Close() })
-	c.Handle("clientSlow", func(req *Request) (any, error) {
+	c.Handle("clientSlow", func(_ *Request) (any, error) {
 		<-releaseClient
 		return item{N: 2}, nil
 	})
