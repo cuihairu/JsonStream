@@ -680,3 +680,19 @@ func TestFlowDeliverAfterDone(t *testing.T) {
 		t.Fatal("deliver after done must be dropped")
 	}
 }
+
+// TestRouteTableDuplicateRegister：重复注册覆盖旧值（table.go 注释
+// 承诺的语义）——同一路由注册两次，查找必须命中后者。
+func TestRouteTableDuplicateRegister(t *testing.T) {
+	tbl := newRouteTable()
+	tbl.Handle("svc", func(*Request) (any, error) { return "first", nil })
+	tbl.Handle("svc", func(*Request) (any, error) { return "second", nil })
+	e, ok := tbl.lookupRoute("svc")
+	if !ok || e.handle == nil {
+		t.Fatal("route missing after duplicate register")
+	}
+	got, err := e.handle(&Request{})
+	if err != nil || got != "second" {
+		t.Fatalf("duplicate register = %q,%v, want second", got, err)
+	}
+}

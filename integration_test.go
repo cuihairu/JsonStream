@@ -2569,3 +2569,94 @@ func TestNegativeCreditDisablesBackpressure(t *testing.T) {
 	}
 	c.Close()
 }
+
+// TestViewCloseIdempotent：视图层终态操作的幂等性——defer 与显式
+// Close/Cancel 共存是常见使用模式，二次调用必须安全（不发帧、不
+// panic、返回 nil），否则重复 CANCEL/UNSUBSCRIBE 会污染对端流表。
+// 顺带断言终态后的 Send 以 ErrClosed 拒绝（isDone 预检）。
+func TestViewCloseIdempotent(t *testing.T) {
+	_, addr := startTestServer(t, shortConfig(), func(s *Server) {
+		s.HandleStream("range", func(req *Request, em Emitter) error {
+			var it item
+			if err := req.Decode(&it); err != nil {
+				return err
+			}
+			for i := 0; i < it.N; i++ {
+				if err := em.Emit(item{N: i}); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		s.HandleChannel("chat", func(ch *Channel) error {
+			for {
+				if _, err := ch.Receive(context.Background()); err != nil {
+					return nil
+				}
+			}
+		})
+	})
+	c := dialTest(t, addr, shortConfig())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// ReadStream：Cancel 二次幂等；取消后流终结
+	st, err := c.Stream(ctx, "range", item{N: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.Next(ctx); !ok {
+		t.Fatalf("no frame: %v", st.Err())
+	}
+	if err := st.Cancel(); err != nil {
+		t.Fatalf("first cancel: %v", err)
+	}
+	if err := st.Cancel(); err != nil {
+		t.Fatalf("second cancel must be nil, got %v", err)
+	}
+
+	// Channel：Close 与 Cancel 各自二次幂等；终态后 Send 拒绝
+	ch, err := c.Channel(ctx, "chat", item{N: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ch.Close(); err != nil {
+		t.Fatalf("first close: %v", err)
+	}
+	if err := ch.Close(); err != nil {
+		t.Fatalf("second close must be nil, got %v", err)
+	}
+	if err := ch.Send(item{N: 1}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("send after close = %v, want ErrClosed", err)
+	}
+	ch2, err := c.Channel(ctx, "chat", item{N: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ch2.Cancel(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ch2.Cancel(); err != nil {
+		t.Fatalf("second cancel must be nil, got %v", err)
+	}
+	if err := ch2.Send(item{N: 1}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("send after cancel = %v, want ErrClosed", err)
+	}
+
+	// Subscription：Close 二次幂等（closeOnce）
+	sub, err := c.Subscribe(ctx, "ticks", func(*Message) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sub.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := sub.Close(); err != nil {
+		t.Fatalf("second unsubscribe must be nil, got %v", err)
+	}
+	c.Close()
+	// Close 不清空会话状态：Close 后读取 SessionID 必须安全且非空
+	if c.SessionID() == "" {
+		t.Fatal("session id must survive Close")
+	}
+}
