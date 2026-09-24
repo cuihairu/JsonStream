@@ -24,16 +24,36 @@ func newTestTransport(t *testing.T, cfg Config, creditWindow int) (*transport, n
 	return tr, c2
 }
 
-// send 在连接死亡后必须立即失败——填满 sendCh 使 select 只剩 dead 分支
-// （否则双就绪随机选择会让断言抖动）。
+// send 在连接死亡后必须立即失败——dead 预检直接命中（kill 完成后的
+// send 不依赖 select 双就绪的随机选择）。
 func TestTransportSendAfterDead(t *testing.T) {
+	tr, _ := newTestTransport(t, shortConfig(), 0)
+	tr.kill(ErrClosed)
+	if err := tr.send(&Frame{}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("send after dead = %v, want ErrClosed", err)
+	}
+}
+
+// send 阻塞在满载 sendCh 上时连接死亡：预检通过（当时未死）后入队
+// 分支阻塞，kill 解除阻塞并确定性走内层 dead 分支返回 ErrClosed。
+func TestTransportSendUnblockedByKill(t *testing.T) {
 	tr, _ := newTestTransport(t, shortConfig(), 0)
 	for i := 0; i < cap(tr.sendCh); i++ {
 		tr.sendCh <- &Frame{}
 	}
-	tr.kill(ErrClosed)
-	if err := tr.send(&Frame{}); !errors.Is(err, ErrClosed) {
-		t.Fatalf("send after dead = %v, want ErrClosed", err)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		tr.kill(ErrClosed)
+	}()
+	done := make(chan error, 1)
+	go func() { done <- tr.send(&Frame{}) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("send unblocked by kill = %v, want ErrClosed", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("kill did not unblock send stuck on full sendCh")
 	}
 }
 

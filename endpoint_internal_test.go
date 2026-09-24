@@ -639,3 +639,17 @@ func TestSubscriptionCallbackErrorsLogged(t *testing.T) {
 		t.Fatalf("callback errors answered with %d frames, want none", n)
 	}
 }
+
+// 流终结后的投递必须被丢弃并返回 false：填满 frames 缓冲让 doneCh 成为
+// select 唯一就绪分支（否则双就绪随机会让覆盖抖动）。
+func TestFlowDeliverAfterDone(t *testing.T) {
+	ep, _ := newTestEndpoint(t, true, nil)
+	flw := newFlow(7, flowStream, ep)
+	for i := 0; i < cap(flw.frames); i++ {
+		flw.frames <- &Frame{}
+	}
+	flw.finish(nil)
+	if flw.deliver(&Frame{}) {
+		t.Fatal("deliver after done must be dropped")
+	}
+}

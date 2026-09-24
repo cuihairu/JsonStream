@@ -1032,6 +1032,95 @@ func TestServerInitiatedModes(t *testing.T) {
 	}
 }
 
+// TestServerInitiatedEncrypted：服务端主动发起 × 压缩+加密——服务端作为
+// 发起方（偶数 Stream ID）的出站变换与客户端被动侧的入站解码，大载荷
+// （过 64B 压缩阈值）逐字节比对。
+func TestServerInitiatedEncrypted(t *testing.T) {
+	key := bytes.Repeat([]byte{0x77}, 32)
+	blob := string(bytes.Repeat([]byte("secure"), 30)) // 180B，必压缩
+	scfg := shortConfig()
+	scfg.Compress = true
+	scfg.Encrypt = true
+	scfg.Key = key
+	srv, addr := startTestServer(t, scfg, nil)
+
+	ccfg := shortConfig()
+	ccfg.Compress = true
+	ccfg.Encrypt = true
+	ccfg.Key = key
+	c := dialTest(t, addr, ccfg)
+	ctx := context.Background()
+
+	gotOneWay := make(chan blobItem, 1)
+	c.HandleOneWay("client.log", func(msg *Message) error {
+		var it blobItem
+		if err := msg.Decode(&it); err != nil {
+			return err
+		}
+		gotOneWay <- it
+		return nil
+	})
+	c.HandleStream("client.range", func(req *Request, em Emitter) error {
+		var n int
+		if err := req.Decode(&n); err != nil {
+			return err
+		}
+		for i := 0; i < n; i++ {
+			if err := em.Emit(blobItem{N: i, Blob: blob}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+
+	sid := c.SessionID()
+
+	// 服务端 → 客户端 请求/响应（客户端 handler 应答）
+	c.Handle("client.echo", func(req *Request) (any, error) {
+		var it blobItem
+		return it, req.Decode(&it)
+	})
+	m, err := srv.Request(ctx, sid, "client.echo", blobItem{N: 1, Blob: blob})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var it blobItem
+	if err := m.Decode(&it); err != nil || it.N != 1 || it.Blob != blob {
+		t.Fatalf("echo: got %+v err=%v", it, err)
+	}
+
+	// 服务端发起流式，客户端 handler 逐帧下发
+	rs, err := srv.Stream(ctx, sid, "client.range", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for want := 0; want < 3; want++ {
+		m, ok := rs.Next(ctx)
+		if !ok {
+			t.Fatalf("stream ended early at %d (err=%v)", want, rs.Err())
+		}
+		if err := m.Decode(&it); err != nil || it.N != want || it.Blob != blob {
+			t.Fatalf("want n=%d, got %+v err=%v", want, it, err)
+		}
+	}
+	if _, ok := rs.Next(ctx); ok {
+		t.Fatal("unexpected extra frame")
+	}
+
+	// 服务端 → 客户端 单向
+	if err := srv.SendOneWay(sid, "client.log", blobItem{N: 9, Blob: blob}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-gotOneWay:
+		if got.N != 9 || got.Blob != blob {
+			t.Fatalf("oneway: got %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("oneway handler not called")
+	}
+}
+
 // TestReconnectAfterServerRestart：服务端整个下线（监听关闭 + 连接被杀），
 // 客户端对拒连端口按退避持续重试；服务端在原地址复活后自动重连成功。
 func TestReconnectAfterServerRestart(t *testing.T) {
