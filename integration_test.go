@@ -180,6 +180,110 @@ func TestResumeReplaysPendingFrames(t *testing.T) {
 	}
 }
 
+// blobItem 载荷 100B 过压缩阈值：保证重放帧在压缩+加密全开下走完整变换管线。
+type blobItem struct {
+	N    int    `json:"n"`
+	Blob string `json:"blob"`
+}
+
+// TestResumeFullStackReplay：断线重连恢复 × 压缩+加密+背压 全开组合——
+// 重放帧经新连接的 flate/AES-GCM 管线还原无损，断开期间产生的帧数超过
+// 信用窗口（4 帧 > Credit=2）时重放仍须正确驱动信用额度，重放完成后
+// 同连接继续正常收发。
+func TestResumeFullStackReplay(t *testing.T) {
+	continueCh := make(chan struct{})
+	key := bytes.Repeat([]byte{0x3C}, 32)
+	scfg := shortConfig()
+	scfg.Compress = true
+	scfg.Encrypt = true
+	scfg.Key = key
+	scfg.Credit = 2
+	_, addr := startTestServer(t, scfg, func(s *Server) {
+		s.Handle("echo", func(req *Request) (any, error) {
+			var v map[string]int
+			return v, req.Decode(&v)
+		})
+		s.HandleStream("slow", func(_ *Request, em Emitter) error {
+			for i := 1; i <= 2; i++ {
+				if err := em.Emit(blobItem{N: i, Blob: string(bytes.Repeat([]byte("x"), 100))}); err != nil {
+					return err
+				}
+			}
+			<-continueCh // 测试在这里掐断连接，之后再放行
+			for i := 3; i <= 6; i++ {
+				if err := em.Emit(blobItem{N: i, Blob: string(bytes.Repeat([]byte("y"), 100))}); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	})
+
+	ccfg := shortConfig()
+	ccfg.Compress = true
+	ccfg.Encrypt = true
+	ccfg.Key = key
+	c := dialTest(t, addr, ccfg)
+	reconnected := make(chan struct{}, 4)
+	c.OnReconnect(func() { reconnected <- struct{}{} })
+
+	ctx := context.Background()
+	stream, err := c.Stream(ctx, "slow", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for want := 1; want <= 2; want++ {
+		m, ok := stream.Next(ctx)
+		var it blobItem
+		if !ok || m.Decode(&it) != nil || it.N != want || len(it.Blob) != 100 {
+			t.Fatalf("live frame %d: got %+v ok=%v", want, it, ok)
+		}
+	}
+
+	// 掐断底层 TCP，模拟网络故障；服务端随后 emit 的 4 帧进入保留队列。
+	c.mu.Lock()
+	tr := c.ep.tr
+	c.mu.Unlock()
+	tr.kill(errors.New("simulated network failure"))
+	time.Sleep(100 * time.Millisecond) // 等服务端走完 unbind
+	close(continueCh)
+
+	select {
+	case <-reconnected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("client did not reconnect")
+	}
+
+	// 重放的 4 帧应经解密+解压无损还原（超过 Credit=2 的窗口额度）。
+	for want := 3; want <= 6; want++ {
+		m, ok := stream.Next(ctx)
+		if !ok {
+			t.Fatalf("replayed frame %d missing (err=%v)", want, stream.Err())
+		}
+		var it blobItem
+		if err := m.Decode(&it); err != nil || it.N != want || len(it.Blob) != 100 {
+			t.Fatalf("replayed frame %d: got %+v err=%v", want, it, err)
+		}
+	}
+	if _, ok := stream.Next(ctx); ok {
+		t.Fatal("unexpected extra frame after replay")
+	}
+	if err := stream.Err(); err != nil {
+		t.Fatalf("stream should end cleanly after replay, got %v", err)
+	}
+
+	// 信用额度未被重放耗散的证明：同连接继续正常往返。
+	m, err := c.Request(ctx, "echo", map[string]int{"a": 7})
+	if err != nil {
+		t.Fatalf("post-replay request failed (credit drift?): %v", err)
+	}
+	var v map[string]int
+	if err := m.Decode(&v); err != nil || v["a"] != 7 {
+		t.Fatalf("post-replay echo: %+v err=%v", v, err)
+	}
+}
+
 // TestResumeExpiredFailsPendingAndResubscribes：会话恢复失败（服务端禁用
 // 保留）时：挂起请求以 SESSION_EXPIRED 失败、OnResumeFailed 触发、订阅自动
 // 重订后广播继续可达。
@@ -580,6 +684,48 @@ func TestModePubSub(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("client→server publish roundtrip failed")
+	}
+}
+
+// TestStreamCancelUnblocksEmit：额度耗尽把 handler 阻塞在 Emit 的取令牌
+// 上之后，客户端取消流应解除阻塞（take 的 ctx 失败上抛，handler 收尾），
+// 而不是永远卡死。
+func TestStreamCancelUnblocksEmit(t *testing.T) {
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	scfg := shortConfig()
+	scfg.Credit = 1
+	_, addr := startTestServer(t, scfg, func(s *Server) {
+		s.HandleStream("firehose", func(_ *Request, em Emitter) error {
+			close(started)
+			for i := 0; ; i++ {
+				if err := em.Emit(item{N: i}); err != nil {
+					done <- err
+					return err
+				}
+			}
+		})
+	})
+
+	ccfg := shortConfig()
+	ccfg.Credit = 1 // 双方都启用：生效值取 min，闸门才存在
+	c := dialTest(t, addr, ccfg)
+	stream, err := c.Stream(context.Background(), "firehose", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	// 不消费任何帧：Credit=1 在第一帧后耗尽，handler 阻塞在下一次取令牌。
+	time.Sleep(100 * time.Millisecond)
+
+	stream.Cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Emit should surface the unblock error to the handler")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Cancel did not unblock Emit stuck on credit take")
 	}
 }
 

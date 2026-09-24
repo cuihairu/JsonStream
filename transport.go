@@ -72,6 +72,14 @@ func (t *transport) rawWrite(f *Frame) error {
 // send 把帧交给写循环；连接已死时返回错误。
 // 受背压约束的调用方必须先 takeCredit。
 func (t *transport) send(f *Frame) error {
+	// dead 优先预检：连接死后 sendCh 仍有空位，不加预检则 select 双就绪
+	// 随机选择——同一次 kill 后的 send 会不确定性地产出 nil（帧入队但
+	// 永不写出，静默丢失）或 ErrClosed。
+	select {
+	case <-t.dead:
+		return ErrClosed
+	default:
+	}
 	select {
 	case t.sendCh <- f:
 		return nil
