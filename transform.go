@@ -11,7 +11,9 @@ import (
 	"sync"
 )
 
-// minCompressSize 之下的载荷不值得压缩（flate 的帧内冷启动开销大于收益）。
+// minCompressSize 之下的载荷不值得压缩：短 JSON 的压缩率常不足 1，
+// flate 流自身的头开销就足以吃掉全部收益（编解码器已池化，冷启动不是
+// 阈值的依据）。
 const minCompressSize = 64
 
 // flate 编解码器按帧新建的代价极高（实测仅 NewWriter 即 ~1.3ms / 800KB
