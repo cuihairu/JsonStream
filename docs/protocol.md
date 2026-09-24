@@ -57,7 +57,7 @@ JsonStream 是一个基于 TCP 的二进制帧协议，承载 JSON 业务数据�
 | Reserved | 1B | 对齐保留，必须为 0。将来可升级为扩展标志位。 |
 | Stream ID | 4B | 连接内唯一的流标识，0 表示"不属于任何流"（仅握手/心跳/连接级错误使用）。 |
 | Payload Length | 4B | 上限 `16 MiB`。解码端读到超限值必须断开（防恶意长度导致 OOM）。该上限同样约束**解压后**的逻辑载荷：压缩比不受发送方约束，flate 解压结果超过 `16 MiB` 视为协议违规（防解压炸弹，同样 OOM 防线）。 |
-| Meta Length | 2B | 仅 `Flags.HasMeta` 时出现，上限 64 KiB。 |
+| Meta Length | 2B | 仅 `Flags.HasMeta` 时出现，上限 64 KiB。`HasMeta` 置位而长度为 0 合法——编码端 flag 置位即写段（长度可为 0），保证解析-编码互逆。 |
 
 ### 3.3 为什么是"长度前缀 + 类型字段"
 

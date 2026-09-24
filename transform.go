@@ -7,10 +7,25 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"fmt"
+	"io"
+	"sync"
 )
 
 // minCompressSize 之下的载荷不值得压缩（flate 的帧内冷启动开销大于收益）。
 const minCompressSize = 64
+
+// flate 编解码器按帧新建的代价极高（实测仅 NewWriter 即 ~1.3ms / 800KB
+// 分配，远超压缩本身），用池复用；每次取出先 Reset 重置状态，用坏也
+// 无碍——Reset 会重新初始化。
+var (
+	flateWriterPool = sync.Pool{New: func() any {
+		w, _ := flate.NewWriter(nil, flate.DefaultCompression)
+		return w
+	}}
+	flateReaderPool = sync.Pool{New: func() any {
+		return flate.NewReader(nil)
+	}}
+)
 
 // transformer 是单连接的 payload 变换管线：JSON → flate（可选）→ AES-256-GCM（可选）。
 // 先压后加密：加密输出近似随机字节，先加密后压缩得不到任何压缩率。
@@ -48,15 +63,15 @@ func (t *transformer) outbound(data []byte) ([]byte, uint8, error) {
 	}
 	if t.compress && len(out) >= minCompressSize {
 		var buf bytes.Buffer
-		w, err := flate.NewWriter(&buf, flate.DefaultCompression)
+		w := flateWriterPool.Get().(*flate.Writer)
+		w.Reset(&buf)
+		_, err := w.Write(out)
+		if err == nil {
+			err = w.Close()
+		}
+		flateWriterPool.Put(w)
 		if err != nil {
-			return nil, 0, fmt.Errorf("jsonstream: flate: %v", err)
-		}
-		if _, err := w.Write(out); err != nil {
-			return nil, 0, fmt.Errorf("jsonstream: compress: %v", err)
-		}
-		if err := w.Close(); err != nil {
-			return nil, 0, fmt.Errorf("jsonstream: compress: %v", err)
+			return nil, 0, fmt.Errorf("jsonstream: compress: %w", err)
 		}
 		out = buf.Bytes()
 		flagBits |= FlagCompressed
@@ -95,13 +110,21 @@ func (t *transformer) inbound(flagBits uint8, data []byte) ([]byte, error) {
 		if !t.compress {
 			return nil, &Error{Code: CodeUnsupported, Message: "received compressed frame but compression is disabled"}
 		}
-		r := flate.NewReader(bytes.NewReader(data))
-		out, err := readAll(r, MaxPayloadSize)
+		// 取出即 Reset：上一使用者遗留的流状态（含越限中断的半流）被
+		// 重新初始化，池化不会跨帧泄漏状态
+		rc := flateReaderPool.Get().(io.ReadCloser)
+		if err := rc.(flate.Resetter).Reset(bytes.NewReader(data), nil); err != nil {
+			flateReaderPool.Put(rc)
+			return nil, fmt.Errorf("jsonstream: decompress: %w", err)
+		}
+		out, err := readAll(rc, MaxPayloadSize)
+		cerr := rc.Close()
+		flateReaderPool.Put(rc)
 		if err != nil {
 			return nil, fmt.Errorf("jsonstream: decompress: %w", err)
 		}
-		if err := r.Close(); err != nil {
-			return nil, fmt.Errorf("jsonstream: decompress: %w", err)
+		if cerr != nil {
+			return nil, fmt.Errorf("jsonstream: decompress: %w", cerr)
 		}
 		data = out
 	}
