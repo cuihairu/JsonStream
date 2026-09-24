@@ -43,6 +43,35 @@ func TestHeartbeatKeepsIdleConnectionAlive(t *testing.T) {
 	}
 }
 
+// TestHeartbeatOnEncryptedConnection：加密连接上 PING/PONG 恒明文直发
+// （§6：心跳不走变换层），静默期跨多个心跳周期后连接仍可用——若心跳
+// 被加密或密文数据帧被按明文解读，任一方向都会立即断链。
+func TestHeartbeatOnEncryptedConnection(t *testing.T) {
+	key := bytes.Repeat([]byte{0x91}, 32)
+	mkCfg := func() Config {
+		cfg := shortConfig()
+		cfg.Heartbeat = 100 * time.Millisecond
+		cfg.Encrypt = true
+		cfg.Key = key
+		return cfg
+	}
+	_, addr := startTestServer(t, mkCfg(), func(s *Server) {
+		s.Handle("ping", func(_ *Request) (any, error) { return item{N: 1}, nil })
+	})
+	c := dialTest(t, addr, mkCfg())
+	time.Sleep(500 * time.Millisecond) // ≥ 4 个心跳周期
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	m, err := c.Request(ctx, "ping", nil)
+	if err != nil {
+		t.Fatalf("heartbeat must keep encrypted connection alive: %v", err)
+	}
+	var it item
+	if err := m.Decode(&it); err != nil || it.N != 1 {
+		t.Fatalf("unexpected response: %v %v", it, err)
+	}
+}
+
 // TestTransportReadIdleTimeout：读空闲超过 1.5×心跳，transport 必须自杀。
 func TestTransportReadIdleTimeout(t *testing.T) {
 	c1, c2 := net.Pipe()
@@ -1590,6 +1619,69 @@ func TestTakeoverKicksOldConnection(t *testing.T) {
 	}
 
 	// 客户端自动重连 → 反过来顶替 raw → 业务恢复
+	recoverDeadline := time.Now().Add(5 * time.Second)
+	for {
+		reqCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_, err := c.Request(reqCtx, "ping", nil)
+		cancel()
+		if err == nil {
+			return
+		}
+		if time.Now().After(recoverDeadline) {
+			t.Fatalf("client did not recover after takeover: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestTakeoverOnEncryptedConnection：takeover × 加密——顶替方的握手
+// 恒明文（§6），顶替发生后旧连接死亡、客户端自动重连走加密握手反顶替，
+// 业务在加密通道上恢复。
+func TestTakeoverOnEncryptedConnection(t *testing.T) {
+	key := bytes.Repeat([]byte{0x4D}, 32)
+	mkCfg := func() Config {
+		cfg := shortConfig()
+		cfg.Encrypt = true
+		cfg.Key = key
+		return cfg
+	}
+	_, addr := startTestServer(t, mkCfg(), func(s *Server) {
+		s.Handle("ping", func(_ *Request) (any, error) { return item{N: 1}, nil })
+	})
+	c := dialTest(t, addr, mkCfg())
+	sid := c.SessionID()
+	c.mu.Lock()
+	oldDead := c.ep.tr.dead
+	c.mu.Unlock()
+
+	raw, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	// 服务端要求加密（未声明会被 AUTH_DENIED 拒绝），顶替方同样声明。
+	f, _ := connectFrame(&ConnectJSON{Version: int(ProtocolVersion), SessionID: sid, HeartbeatMS: 1000, Encrypt: true})
+	if err := writeOnce(raw, f); err != nil {
+		t.Fatal(err)
+	}
+	ack, err := ReadFrame(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ack.Type != TypeConnAck {
+		t.Fatalf("want CONNACK, got %s: %s", ack.Type, ack.Payload)
+	}
+	var aj connackJSON
+	if err := jsonUnmarshal(ack.Payload, &aj); err != nil || !aj.Resumed {
+		t.Fatalf("want resumed session, resumed=%v err=%v", aj.Resumed, err)
+	}
+	select {
+	case <-oldDead:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old connection not killed by takeover")
+	}
+
+	// 客户端自动重连（加密握手）→ 反顶替 raw → 加密通道业务恢复
 	recoverDeadline := time.Now().Add(5 * time.Second)
 	for {
 		reqCtx, cancel := context.WithTimeout(context.Background(), time.Second)
