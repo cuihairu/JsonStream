@@ -19,7 +19,25 @@ func TestErrorStringAndClassification(t *testing.T) {
 	if CodeSessionExpired.String() != "SESSION_EXPIRED" || CodeBusy.String() != "BUSY" {
 		t.Fatal("ErrorCode.String name mapping broken")
 	}
-	if ErrorCode(99).String() != "UNKNOWN" {
-		t.Fatalf("unknown code should render UNKNOWN, got %q", ErrorCode(99).String())
+	// 全表：错误码 → 线上/日志名字的完整映射（§7.10）
+	all := map[ErrorCode]string{
+		CodeInternal:       "INTERNAL",
+		CodeNotFound:       "NOT_FOUND",
+		CodeInvalid:        "INVALID",
+		CodeProtocol:       "PROTOCOL",
+		CodeCancelled:      "CANCELLED",
+		CodeTimeout:        "TIMEOUT",
+		CodeAuthDenied:     "AUTH_DENIED",
+		CodeSessionExpired: "SESSION_EXPIRED",
+		CodeBusy:           "BUSY",
+		CodeUnsupported:    "UNSUPPORTED",
+	}
+	for code, want := range all {
+		if got := code.String(); got != want {
+			t.Errorf("ErrorCode(%d).String() = %q, want %q", uint8(code), got, want)
+		}
+	}
+	if got := ErrorCode(99).String(); got != "UNKNOWN" {
+		t.Fatalf("unknown code should render UNKNOWN, got %q", got)
 	}
 }
