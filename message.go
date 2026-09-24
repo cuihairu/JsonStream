@@ -64,6 +64,9 @@ func (c streamContext) Err() error {
 }
 
 // Emitter 由流式 handler 用于逐帧下发（受背压约束，额度耗尽时阻塞）。
+// Emitter 是流式 handler 的下发端：Emit 逐帧发送，handler 正常返回时
+// 自动 COMPLETE。仅在 handler 的 goroutine 内使用（每条流一个
+// goroutine，见包文档「并发模型」）。
 type Emitter interface {
 	Emit(v any) error
 }

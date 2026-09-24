@@ -9,8 +9,9 @@ const (
 	kindStream                     // Emitter 多帧下发 + 自动 COMPLETE
 )
 
-// routeTable 是一端的路由注册表。所有注册须在连接建立（Serve/Dial）之前
-// 完成，此后表为只读，读写无需加锁（保留下面的 RWMutex 以防万一）。
+// routeTable 是一端的路由注册表。注册与查找全程走 RWMutex：注册可
+// 并发调用，运行中注册对新请求立即生效（既有惯例仍是 Serve/Dial 前
+// 完成全部注册，语义最简单）。
 type routeTable struct {
 	mu       sync.RWMutex
 	routes   map[string]routeEntry

@@ -12,6 +12,7 @@ import (
 
 // Client 是 JsonStream 客户端：自动重连（指数退避 + 抖动）、会话恢复
 // （resumed 时保留挂起流等待重放）、断连期间 API 调用挂起而非报错。
+// 公开方法可被多个 goroutine 并发调用（见包文档「并发模型」）。
 type Client struct {
 	cfg   Config
 	addr  string

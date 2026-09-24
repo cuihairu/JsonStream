@@ -12,7 +12,8 @@ import (
 	"time"
 )
 
-// Server 是 JsonStream 服务端。注册路由须在 Serve 之前完成。
+// Server 是 JsonStream 服务端。路由注册可并发调用，建议在 Serve 之前
+// 完成；运行中注册对新请求立即生效（见包文档「并发模型」）。
 type Server struct {
 	cfg   Config
 	ln    net.Listener

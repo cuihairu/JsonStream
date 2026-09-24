@@ -156,7 +156,8 @@ func (flw *flow) ack() {
 
 // ---- 发起方视角的流读取器 ----
 
-// ReadStream 是流式响应（Flags.Stream）的读取端。
+// ReadStream 是流式响应（Flags.Stream）的读取端。Next 是单消费接口：
+// 在单个 goroutine 中循环调用（见包文档「并发模型」）。
 type ReadStream struct {
 	f *flow
 }
@@ -225,7 +226,8 @@ func (s *ReadStream) Cancel() error {
 
 // Channel 是双工（Flags.Channel）流的两端通用视图：双方都可
 // Send/Receive，Close 发送 COMPLETE（半关闭："我说完了"），
-// Cancel 立即终结整条流。
+// Cancel 立即终结整条流。Send 可并发调用；Receive 是单消费接口，
+// 在单个 goroutine 中循环调用（见包文档「并发模型」）。
 type Channel struct {
 	f   *flow
 	ctx context.Context
@@ -303,7 +305,8 @@ func (c *Channel) Cancel() error {
 // ---- 订阅 ----
 
 // Subscription 是一条主题订阅。回调错误只记日志不回帧（投递方向上
-// 回应会形成"响应的响应"，见 docs/protocol.md §7.8）。
+// 回应会形成"响应的响应"，见 docs/protocol.md §7.8）。回调在内部
+// goroutine 中逐帧串行执行，回调内可安全调用 Client 的其他方法。
 type Subscription struct {
 	topic string
 	h     func(*Message) error
