@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,6 +39,33 @@ func (l *syncLogger) waitFor(t *testing.T, n int) {
 			l.mu.Lock()
 			defer l.mu.Unlock()
 			t.Fatalf("timed out waiting for %d log lines, have %d: %v", n, len(l.lines), l.lines)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// waitForLine 轮询直到出现含 substr 的日志行。作为异步 goroutine 执行
+// 进度的锚点使用：日志行与紧随其后的代码是连续语句，看到日志即可断定
+// 后续路径已到达——比固定时窗可靠（race 模式下调度慢化会漂移）。
+func (l *syncLogger) waitForLine(t *testing.T, substr string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		l.mu.Lock()
+		var found bool
+		for _, line := range l.lines {
+			if strings.Contains(line, substr) {
+				found = true
+				break
+			}
+		}
+		snapshot := append([]string(nil), l.lines...)
+		l.mu.Unlock()
+		if found {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for line %q, have %v", substr, snapshot)
 		}
 		time.Sleep(time.Millisecond)
 	}

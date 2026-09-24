@@ -429,11 +429,13 @@ func TestClientCloseDuringReconnectBackoff(t *testing.T) {
 		t.Fatalf("session = %q, want b1", got)
 	}
 
-	// 等断线确认后 300ms 再 Close：connectLoop 从 tr.dead 醒来到进入
-	// 262 行退避是微秒级，而退避抖动睡 [1s,2s]，300ms 时必然还在其中，
-	// Close 稳定命中 sleepBackoff 的 closed 分支。
+	// 等断线确认后 500ms 再 Close：这一路径的 sleepBackoff 在「connection
+	// lost」日志之前，没有日志锚点可用。确定性依据是窗口宽度——从
+	// 服务端断开到 connectLoop 进入 262 行退避是一段纯内存路径（race
+	// 下也在百 ms 量级以内），而退避抖动睡 [1s,2s]，500ms 时必然还在
+	// 其中；300ms 的旧窗口在 race 慢调度下余量不足。
 	<-disconnected
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
 	c.Close()
 }
 
@@ -472,6 +474,8 @@ func TestClientCloseDuringRetryBackoff(t *testing.T) {
 	cfg := shortConfig()
 	cfg.BackoffInitial = 2 * time.Second
 	cfg.BackoffMax = 2 * time.Second
+	var lg syncLogger
+	cfg.Logger = &lg
 	c, err := Dial(context.Background(), ln.Addr().String(), cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -483,7 +487,11 @@ func TestClientCloseDuringRetryBackoff(t *testing.T) {
 
 	<-disconnected
 	ln.Close() // 此后的重拨必然连接拒绝 → 进入重试退避
-	time.Sleep(300 * time.Millisecond)
+	// 「retry in」日志与 sleepBackoff 是连续语句：看到日志即断定退避
+	// 睡眠已到达，此刻 Close 无论落在睡眠之前还是之中都命中 closed
+	// 打断分支。不用固定时窗——race 慢调度下 connectLoop 走到退避的
+	// 时刻会漂移，固定 300ms 偶发把 Close 提前，漏掉打断路径。
+	lg.waitForLine(t, "retry in")
 	c.Close()
 }
 
@@ -532,6 +540,8 @@ func TestClientCloseDuringHandshakeRetryBackoff(t *testing.T) {
 	cfg := shortConfig()
 	cfg.BackoffInitial = 2 * time.Second
 	cfg.BackoffMax = 2 * time.Second
+	var lg syncLogger
+	cfg.Logger = &lg
 	c, err := Dial(context.Background(), ln.Addr().String(), cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -541,8 +551,10 @@ func TestClientCloseDuringHandshakeRetryBackoff(t *testing.T) {
 		t.Fatalf("session = %q, want b3", got)
 	}
 
+	// 同 TestClientCloseDuringRetryBackoff：以「retry in」日志为锚点
+	// 确认握手失败退避已到达，再 Close 打断。
 	<-handshakeBroken
-	time.Sleep(300 * time.Millisecond) // 退避抖动 [1s,2s]，Close 必然落在窗口内
+	lg.waitForLine(t, "retry in")
 	c.Close()
 }
 
