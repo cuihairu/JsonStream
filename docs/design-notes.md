@@ -141,4 +141,4 @@ RSocket 把三种请求拆成三个帧类型；JsonStream 用一个 `REQUEST` �
 - **确定性并发技巧**：双分支 `select` 的随机性是覆盖率的头号敌人，解法是消灭"另一个就绪分支"——填满 `sendCh`（容量 256）让发送只剩关闭分支；让请求卡在 `select` 之前的发送步骤，再预布置"响应 + COMPLETE"双就绪后放行，保证 drain 分支必然到达。写失败用 SO_Linger(0) 的 RST（FIN 后缓冲区写仍会成功，RST 才是真失败）；写超时用 1 MiB 载荷塞满回环缓冲。剩下的真随机分支（如先收到响应还是先收到终结帧）用 20~100 次迭代把漏检概率压到 2^-20 以下。
 - **race detector 的两条纪律**：它按向量时钟判定，墙钟错开但无 happens-before 边照样报——sleep 治不了竞态，只有 channel/spawn 边能。由此推出全局桩的顺序约束：先写桩后 spawn 的 goroutine 读桩天然有序（spawn 边），反向则永远无序，所以桩测试必须先于一切泄漏握手 goroutine 的测试执行（见 client_server_internal_test.go 文件首注释）。
 
-已知边界：`go test -shuffle=on` 实测稳定通过，但那是 spawn 边与默认顺序的余量，不是设计承诺；桩与泄漏 goroutine 的完整互斥需要给生产代码加锁，为测试基建不值得。
+已知边界：默认顺序下桩安全（先写桩后 spawn 的读经 spawn 边有序），`-shuffle=on` 实测约 1/3 排列会翻车——服务端 handleConn 收尾（错误帧/CONNACK 编码）的读桩跨越测试边界，与后续测试的桩写入无 happens-before。这是全局桩与异步收尾的固有属性，彻底互斥需要给生产代码加锁，为非契约场景（Go 默认不开 shuffle，CI 亦不开）不值得。

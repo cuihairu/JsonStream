@@ -120,7 +120,10 @@ func stubGCM(t *testing.T, key []byte, failCall int) {
 // goroutine」的 Dial 测试执行（本文件是字母序最早的测试文件，桩测试
 // 置于文件首即满足；先写后读经 goroutine spawn 边天然有序）。桩写入
 // 与泄漏读侧之间不存在 happens-before，race detector 按向量时钟判定，
-// 与墙钟无关——不要把会泄漏握手 goroutine 的测试挪到本文件之前。
+// 与墙钟无关——不要把会泄漏握手 goroutine 的测试挪到本文件之前。另：
+// -shuffle=on 下服务端 handleConn 收尾（错误帧/CONNACK 编码）的读桩会
+// 跨越测试边界（约 1/3 排列翻车）——shuffle 为非契约场景（Go 默认不
+// 开，CI 亦不开），不承诺绿，见 design-notes.md §9。
 func TestClientHandshakeConnectMarshalError(t *testing.T) {
 	addr := startRawListener(t, func(net.Conn) {})
 	orig := jsonMarshal
