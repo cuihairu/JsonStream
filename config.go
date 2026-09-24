@@ -9,7 +9,7 @@ import (
 )
 
 // jsonMarshal 是包级接缝：测试注入 marshal 失败以覆盖各编码路径的错误分支。
-var jsonMarshal = func(v any) ([]byte, error) { return json.Marshal(v) }
+var jsonMarshal = json.Marshal
 
 func jsonUnmarshal(b []byte, v any) error {
 	return json.Unmarshal(b, v)

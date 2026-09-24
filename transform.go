@@ -74,7 +74,7 @@ func (t *transformer) outbound(data []byte) ([]byte, uint8, error) {
 	if t.compress && len(out) >= minCompressSize {
 		var buf bytes.Buffer
 		// Write/Close 的错误只可能来自底层写入器；此处恒为 bytes.Buffer
-		//（Reset 后写入），16MiB 上界的压缩输出远不可及 ErrTooLarge，
+		// （Reset 后写入），16MiB 上界的压缩输出远不可及 ErrTooLarge，
 		// 两者的错误分支是构造性死码，不设检查。
 		w := flateWriterPool.Get().(*flate.Writer)
 		w.Reset(&buf)

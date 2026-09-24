@@ -22,10 +22,18 @@ func main() {
 	demoSec := flag.Int("demo", 10, "演示运行时长（秒）")
 	flag.Parse()
 
-	ctx := context.Background()
-	c, err := jsonstream.Dial(ctx, *addr, jsonstream.DefaultConfig())
-	if err != nil {
+	// 错误经 run 返回后统一 Fatal：run 内的 defer（连接/订阅清理）
+	// 先执行，不用 log.Fatal 直接中断而跳过它们。
+	if err := run(*addr, time.Duration(*demoSec)*time.Second); err != nil {
 		log.Fatal(err)
+	}
+}
+
+func run(addr string, demo time.Duration) error {
+	ctx := context.Background()
+	c, err := jsonstream.Dial(ctx, addr, jsonstream.DefaultConfig())
+	if err != nil {
+		return err
 	}
 	defer c.Close()
 
@@ -47,7 +55,7 @@ func main() {
 		return nil
 	})
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	defer sub.Close()
 
@@ -57,17 +65,17 @@ func main() {
 	}
 	m, err := c.Request(ctx, "math.add", map[string]int{"a": 2, "b": 40})
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	if err := m.Decode(&sum); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	log.Printf("math.add(2, 40) = %d", sum.Sum)
 
 	// ---- 流式响应：读两条后取消（服务端 Emitter 收到错误随之收尾） ----
 	stream, err := c.Stream(ctx, "range", map[string]int{"n": 100})
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	for i := 0; i < 2; i++ {
 		msg, ok := stream.Next(ctx)
@@ -77,20 +85,21 @@ func main() {
 		log.Printf("range item: %s", msg.Payload)
 	}
 	if err := stream.Cancel(); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	log.Printf("range cancelled after 2 items")
 
 	// ---- 单向发送 + 客户端 → 服务端主题发布 ----
 	if err := c.SendOneWay("notify", map[string]string{"text": "fire and forget"}); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	if err := c.Publish("metrics", map[string]int{"cpu": 42}); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	log.Printf("sent oneway + published metrics")
 
 	// 挂在订阅上观察广播；演示时长结束后退出。
-	time.Sleep(time.Duration(*demoSec) * time.Second)
+	time.Sleep(demo)
 	log.Printf("done")
+	return nil
 }

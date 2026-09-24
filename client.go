@@ -57,7 +57,7 @@ func Dial(ctx context.Context, addr string, cfg Config) (*Client, error) {
 			return nil, err
 		}
 	case <-ctx.Done():
-		c.Close()
+		_ = c.Close() // 超时放弃握手；ctx.Err() 优先上报
 		return nil, ctx.Err()
 	}
 	return c, nil

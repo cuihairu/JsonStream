@@ -181,7 +181,7 @@ func (s *ReadStream) Next(ctx context.Context) (*Message, bool) {
 		}
 		return toMessage(f), true
 	case <-ctx.Done():
-		s.Cancel()
+		_ = s.Cancel() // 超时即主动取消；连接已死时流随之终结，错误无处可报
 		return nil, false
 	case <-s.f.doneCh:
 		// 正常 COMPLETE 终结后先排空余帧（终结与交付异步，select 双就绪
