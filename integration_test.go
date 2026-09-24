@@ -761,6 +761,59 @@ func TestModeErrorPropagation(t *testing.T) {
 	}
 }
 
+// TestStreamChannelHandlerPanic：流式/双工 handler panic 不崩进程——
+// 与 Request 路径共用 runRequest 的 recover 兜底：流以 INTERNAL 终结、
+// 连接继续可用。
+func TestStreamChannelHandlerPanic(t *testing.T) {
+	scfg := shortConfig()
+	_, addr := startTestServer(t, scfg, func(s *Server) {
+		s.HandleStream("panic-stream", func(_ *Request, _ Emitter) error {
+			panic("stream handler exploded")
+		})
+		s.HandleChannel("panic-channel", func(_ *Channel) error {
+			panic("channel handler exploded")
+		})
+		s.Handle("echo", func(req *Request) (any, error) {
+			var it item
+			return it, req.Decode(&it)
+		})
+	})
+	c := dialTest(t, addr, shortConfig())
+	ctx := context.Background()
+	var je *Error
+
+	// 流式：panic → 流以 INTERNAL 终结
+	rs, err := c.Stream(ctx, "panic-stream", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rs.Next(ctx); ok {
+		t.Fatal("panicking stream should not deliver frames")
+	}
+	if !errors.As(rs.Err(), &je) || je.Code != CodeInternal {
+		t.Fatalf("stream Err = %v, want INTERNAL", rs.Err())
+	}
+
+	// 双工：panic → Receive 报 INTERNAL
+	ch, err := c.Channel(ctx, "panic-channel", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ch.Receive(ctx); !errors.As(err, &je) || je.Code != CodeInternal {
+		t.Fatalf("channel Receive = %v, want INTERNAL", err)
+	}
+
+	// 连接仍可用
+	m, err := c.Request(ctx, "echo", item{N: 3})
+	if err != nil {
+		t.Fatalf("connection should survive handler panics: %v", err)
+	}
+	var it item
+	if err := m.Decode(&it); err != nil || it.N != 3 {
+		t.Fatalf("echo after panics: %+v err=%v", it, err)
+	}
+}
+
 // ---- 背压 ----
 
 // TestBackpressureBlocksSender：credit 窗口为 4 时，接收方不消费，发送方
