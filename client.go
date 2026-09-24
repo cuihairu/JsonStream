@@ -370,6 +370,11 @@ func (c *Client) bindSession(conn net.Conn, br *bufio.Reader, aj *connackJSON) (
 				ep.registerFlow(flw)
 			}
 		}
+		// Stream ID 计数器跨重连单调递增：重置会让新分配的 ID 与迁移流
+		// （以及在途的旧终结帧）撞号—— COMPLETE 误杀新注册的同 ID 流。
+		oldEp.idMu.Lock()
+		ep.nextID = oldEp.nextID
+		oldEp.idMu.Unlock()
 	}
 	var toResub []*Subscription
 	if resumeFailed {

@@ -313,6 +313,91 @@ func TestResumeFullStackReplay(t *testing.T) {
 	}
 }
 
+// TestConsecutiveResumes：连续两轮断线-恢复——真实网络抖动的常态。第二轮
+// resume 时上一轮的保留队列应已清空（不重放旧帧）、会话 ID 跨多轮保持、
+// 每轮「实时帧→断开→保留帧重放」的顺序都正确，最终连接健康。
+func TestConsecutiveResumes(t *testing.T) {
+	const rounds = 2
+	continueCh := make(chan struct{}, 2*rounds)
+	_, addr := startTestServer(t, shortConfig(), func(s *Server) {
+		s.Handle("echo", func(req *Request) (any, error) {
+			var v map[string]int
+			return v, req.Decode(&v)
+		})
+		s.HandleStream("slow", func(_ *Request, em Emitter) error {
+			for round := 0; round < rounds; round++ {
+				for i := 0; i < 2; i++ { // 实时段：连接活着，客户端直接收到
+					if err := em.Emit(item{N: round*10 + i}); err != nil {
+						return err
+					}
+				}
+				<-continueCh             // 等测试掐断连接后放行
+				for i := 0; i < 2; i++ { // 保留段：断开期间，进保留队列
+					if err := em.Emit(item{N: round*10 + 2 + i}); err != nil {
+						return err
+					}
+				}
+				<-continueCh // 等测试验证完重放后放行
+			}
+			return nil
+		})
+	})
+
+	cfg := shortConfig()
+	c := dialTest(t, addr, cfg)
+	reconnected := make(chan struct{}, 8)
+	c.OnReconnect(func() { reconnected <- struct{}{} })
+	ctx := context.Background()
+
+	stream, err := c.Stream(ctx, "slow", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := c.SessionID()
+
+	for round := 0; round < rounds; round++ {
+		for want := 0; want < 2; want++ {
+			m, ok := stream.Next(ctx)
+			var it item
+			if !ok || m.Decode(&it) != nil || it.N != round*10+want {
+				t.Fatalf("round %d live frame %d: got %+v ok=%v", round, want, it, ok)
+			}
+		}
+		c.mu.Lock()
+		tr := c.ep.tr
+		c.mu.Unlock()
+		tr.kill(errors.New("simulated network failure"))
+		time.Sleep(100 * time.Millisecond) // 等服务端 unbind
+		continueCh <- struct{}{}           // 放行保留段
+		select {
+		case <-reconnected:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("round %d: client did not reconnect", round)
+		}
+		if c.SessionID() != sid {
+			t.Fatalf("round %d: session id changed: %s -> %s", round, sid, c.SessionID())
+		}
+		for want := 2; want < 4; want++ {
+			m, ok := stream.Next(ctx)
+			var it item
+			if !ok || m.Decode(&it) != nil || it.N != round*10+want {
+				t.Fatalf("round %d replayed frame %d: got %+v ok=%v", round, want, it, ok)
+			}
+		}
+		continueCh <- struct{}{} // 放行下一轮实时段
+	}
+
+	// 多轮恢复后连接健康。
+	m, err := c.Request(ctx, "echo", map[string]int{"a": 9})
+	if err != nil {
+		t.Fatalf("request after consecutive resumes: %v", err)
+	}
+	var v map[string]int
+	if err := m.Decode(&v); err != nil || v["a"] != 9 {
+		t.Fatalf("echo after resumes: %+v err=%v", v, err)
+	}
+}
+
 // TestResumeExpiredFailsPendingAndResubscribes：会话恢复失败（服务端禁用
 // 保留）时：挂起请求以 SESSION_EXPIRED 失败、OnResumeFailed 触发、订阅自动
 // 重订后广播继续可达。
