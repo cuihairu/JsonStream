@@ -115,6 +115,12 @@ func stubGCM(t *testing.T, key []byte, failCall int) {
 }
 
 // CONNECT 编码失败（接缝注入）→ establish 首步报错。
+//
+// 顺序约束：jsonMarshal 桩必须先于一切可能泄漏「尚未读桩的握手
+// goroutine」的 Dial 测试执行（本文件是字母序最早的测试文件，桩测试
+// 置于文件首即满足；先写后读经 goroutine spawn 边天然有序）。桩写入
+// 与泄漏读侧之间不存在 happens-before，race detector 按向量时钟判定，
+// 与墙钟无关——不要把会泄漏握手 goroutine 的测试挪到本文件之前。
 func TestClientHandshakeConnectMarshalError(t *testing.T) {
 	addr := startRawListener(t, func(net.Conn) {})
 	orig := jsonMarshal
