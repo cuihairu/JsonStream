@@ -158,11 +158,11 @@ for _, id := range srv.Sessions() {
 
 | 基准 | 结果 |
 |---|---|
-| 帧编解码往返 64B / 1KiB / 64KiB | ~5.5µs / ~9.6µs（~110MB/s）/ ~170µs（~400MB/s） |
-| 变换管线（1.4KiB JSON，含往返） | 明文 ~20ns；AES-GCM ~25µs；flate ~370µs；flate+GCM ~440µs |
-| 请求/响应 RTT（本机回环） | ~0.2–0.4ms |
+| 帧编解码往返 64B / 1KiB / 64KiB | ~1.1µs（~95MB/s）/ ~1.1µs（~985MB/s）/ ~67µs（~985MB/s） |
+| 变换管线（1.4KiB JSON，含往返） | 明文 ~15ns；AES-GCM ~5µs；flate ~60µs；flate+GCM ~52µs |
+| 请求/响应 RTT（本机回环） | ~0.1ms |
 
-压缩路径按帧复用 flate 编解码器（`sync.Pool` + `Reset`）：按帧新建 writer 的实测代价是 ~1.3ms / ~800KB 垃圾每帧，池化后压缩往返 4.1 倍提速、分配降 162 倍。加密吞吐偏低是本机无 AES-NI 所致，支持 AES-NI 的硬件上 GCM 接近线速。
+压缩路径按帧复用 flate 编解码器（`sync.Pool` + `Reset`）：按帧新建 writer 的实测代价是 ~1.3ms / ~800KB 垃圾每帧，池化后压缩往返 4.1 倍提速、分配降 162 倍。GCM 先压缩后加密（只处理压缩后字节），吞吐受本机无 AES-NI 限制，支持 AES-NI 的硬件上接近线速。
 
 # 文档
 
