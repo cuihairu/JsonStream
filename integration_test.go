@@ -71,7 +71,7 @@ func TestSilentPeerDisconnectedByHeartbeat(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	cj := &connectJSON{Version: int(ProtocolVersion)}
+	cj := &ConnectJSON{Version: int(ProtocolVersion)}
 	f, _ := connectFrame(cj)
 	if err := writeOnce(conn, f); err != nil {
 		t.Fatal(err)
@@ -724,7 +724,7 @@ func TestConnectionLevelErrorCloses(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	f, _ := connectFrame(&connectJSON{Version: int(ProtocolVersion)})
+	f, _ := connectFrame(&ConnectJSON{Version: int(ProtocolVersion)})
 	if err := writeOnce(conn, f); err != nil {
 		t.Fatal(err)
 	}
@@ -1272,7 +1272,7 @@ func TestTakeoverKicksOldConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer raw.Close()
-	cj := &connectJSON{Version: int(ProtocolVersion), SessionID: sid, HeartbeatMS: 1000}
+	cj := &ConnectJSON{Version: int(ProtocolVersion), SessionID: sid, HeartbeatMS: 1000}
 	f, _ := connectFrame(cj)
 	if err := writeOnce(raw, f); err != nil {
 		t.Fatal(err)

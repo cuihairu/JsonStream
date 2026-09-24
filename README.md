@@ -118,7 +118,39 @@ sub, _ := c.Subscribe(ctx, "ticks", func(m *jsonstream.Message) error { ... })
 _ = c.Publish("metrics", v)                                        // client → server
 ```
 
-服务端（`Server.Handle/HandleStream/HandleChannel/HandleOneWay/HandlePublish` + `Serve`）见 `examples/server/main.go`；服务端也可主动向指定会话发起交互（`Server.Sessions/Request/Stream/Channel/SendOneWay`，客户端以 `Handle*` 应答，Stream ID 按偶数分配）。
+参数化配置（压缩/加密/背压/重连默认关闭，握手协商后生效）：
+
+```go
+cfg := jsonstream.DefaultConfig()
+cfg.Heartbeat = 15 * time.Second   // 心跳间隔（静默对端超时翻倍判死）
+cfg.Compress = true                // ≥64B 载荷走 flate；双方都开启才生效
+cfg.Encrypt = true                 // AES-256-GCM，先压缩后加密
+cfg.Key = key32                    // 32 字节预共享密钥
+cfg.Credit = 64                    // 连接级信用窗口；生效值取双方最小
+b := false
+cfg.Reconnect = &b                 // 关闭断线自动重连（默认开）
+c, _ := jsonstream.Dial(ctx, addr, cfg)
+```
+
+服务端 API 一览（`Handle*` 应答客户端发起；`Sessions` + 带 `sessionID` 的方法反向发起，Stream ID 按偶数分配）：
+
+```go
+srv, _ := jsonstream.NewServer(ln, jsonstream.DefaultConfig())
+srv.Handle("math.add", func(req *jsonstream.Request) (any, error) { ... })
+srv.HandleStream("range", func(req *jsonstream.Request, em jsonstream.Emitter) error { ... })
+srv.HandleChannel("chat", func(ch *jsonstream.Channel) error { ... })
+srv.HandleOneWay("notify", func(m *jsonstream.Message) error { ... })
+srv.HandlePublish("metrics", func(m *jsonstream.Message) error { ... })
+srv.OnAuth(func(cj *jsonstream.ConnectJSON) error { return nil }) // 鉴权钩子（读能力声明与凭证）
+go srv.Serve()
+
+// 向指定会话主动发起
+for _, id := range srv.Sessions() {
+    m, _ := srv.Request(ctx, id, "ping", nil)
+    _, _ = srv.Stream(ctx, id, "time", nil)
+    _, _, _ = m, id, ctx
+}
+```
 
 # 性能
 

@@ -160,7 +160,7 @@ var ErrClosed = errors.New("jsonstream: connection closed")
 func ReadFrame(r io.Reader) (*Frame, error) {
 	var head [headerSize]byte
 	if _, err := io.ReadFull(r, head[:]); err != nil {
-		return nil, fmt.Errorf("%w: header: %v", ErrMalformed, err)
+		return nil, fmt.Errorf("%w: header: %w", ErrMalformed, err)
 	}
 	if head[0] != magic0 || head[1] != magic1 {
 		return nil, fmt.Errorf("%w: bad magic %02x%02x", ErrMalformed, head[0], head[1])
@@ -186,20 +186,20 @@ func ReadFrame(r io.Reader) (*Frame, error) {
 	if f.Flags&FlagHasMeta != 0 {
 		var ml [metaLenSize]byte
 		if _, err := io.ReadFull(r, ml[:]); err != nil {
-			return nil, fmt.Errorf("%w: meta length: %v", ErrMalformed, err)
+			return nil, fmt.Errorf("%w: meta length: %w", ErrMalformed, err)
 		}
 		n := int(binary.BigEndian.Uint16(ml[:]))
 		// n ≤ 65535 恒满足 64KiB 上限（uint16 上界保证，§2）；上限由
 		// 编码侧 appendTo 对称校验。
 		f.Metadata = make([]byte, n)
 		if _, err := io.ReadFull(r, f.Metadata); err != nil {
-			return nil, fmt.Errorf("%w: metadata: %v", ErrMalformed, err)
+			return nil, fmt.Errorf("%w: metadata: %w", ErrMalformed, err)
 		}
 	}
 	if payloadLen > 0 {
 		f.Payload = make([]byte, payloadLen)
 		if _, err := io.ReadFull(r, f.Payload); err != nil {
-			return nil, fmt.Errorf("%w: payload: %v", ErrMalformed, err)
+			return nil, fmt.Errorf("%w: payload: %w", ErrMalformed, err)
 		}
 	}
 	return f, nil

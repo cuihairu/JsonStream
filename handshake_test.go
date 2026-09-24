@@ -16,22 +16,22 @@ func TestEffectiveConnack(t *testing.T) {
 	}
 	tests := []struct {
 		name string
-		cj   connectJSON
+		cj   ConnectJSON
 		want connackJSON
 	}{
 		{
 			name: "双方全开+客户端 credit 更小",
-			cj:   connectJSON{Version: 1, Compress: true, Encrypt: true, Credit: 2},
+			cj:   ConnectJSON{Version: 1, Compress: true, Encrypt: true, Credit: 2},
 			want: connackJSON{Compress: true, Encrypt: true, Credit: 2, HeartbeatMS: 3000, RetentionMS: 40000},
 		},
 		{
 			name: "客户端拒绝压缩但同意加密",
-			cj:   connectJSON{Version: 1, Compress: false, Encrypt: true, Credit: 16},
+			cj:   ConnectJSON{Version: 1, Compress: false, Encrypt: true, Credit: 16},
 			want: connackJSON{Compress: false, Encrypt: true, Credit: 8, HeartbeatMS: 3000, RetentionMS: 40000},
 		},
 		{
 			name: "客户端 credit 为 0（关闭背压请求）",
-			cj:   connectJSON{Version: 1, Credit: 0},
+			cj:   ConnectJSON{Version: 1, Credit: 0},
 			want: connackJSON{HeartbeatMS: 3000, RetentionMS: 40000},
 		},
 	}
@@ -44,11 +44,11 @@ func TestEffectiveConnack(t *testing.T) {
 		})
 	}
 	// 双方都未启用 credit：生效值为 0
-	if aj := effectiveConnack(Config{}, &connectJSON{Version: 1, Credit: 4}); aj.Credit != 0 {
+	if aj := effectiveConnack(Config{}, &ConnectJSON{Version: 1, Credit: 4}); aj.Credit != 0 {
 		t.Fatalf("credit with server disabled = %d, want 0", aj.Credit)
 	}
 	// 客户端声明 0（拒绝背压）：服务端即使启用也不得强加窗口
-	if aj := effectiveConnack(Config{Credit: 8}, &connectJSON{Version: 1}); aj.Credit != 0 {
+	if aj := effectiveConnack(Config{Credit: 8}, &ConnectJSON{Version: 1}); aj.Credit != 0 {
 		t.Fatalf("credit with client declined = %d, want 0", aj.Credit)
 	}
 }
@@ -59,7 +59,7 @@ func TestHandshakeFrameMarshalError(t *testing.T) {
 	jsonMarshal = func(any) ([]byte, error) { return nil, errors.New("marshal failed") }
 	defer func() { jsonMarshal = orig }()
 
-	if _, err := connectFrame(&connectJSON{}); err == nil {
+	if _, err := connectFrame(&ConnectJSON{}); err == nil {
 		t.Fatal("connectFrame must surface marshal errors")
 	}
 	if _, err := connackFrame(&connackJSON{}); err == nil {

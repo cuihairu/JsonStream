@@ -66,6 +66,26 @@ func FuzzTransformInbound(f *testing.F) {
 	f.Add(uint8(FlagCompressed), []byte{0x01, 0x05, 0x00, 0xfa, 0xff}) // 坏 flate 流
 	f.Add(uint8(FlagEncrypted), bytes.Repeat([]byte{0}, 64))           // 均匀垃圾密文
 	f.Add(uint8(FlagEncrypted|FlagCompressed), []byte("x"))
+	// 合法压缩流与合法密文：让 fuzz 直接站在解压/解密成功路径上探索，
+	// 而不是先花预算重新发现合法流
+	compOnly, err := newTransformer(&Config{Compress: true})
+	if err != nil {
+		f.Fatal(err)
+	}
+	encOnly, err := newTransformer(&Config{Encrypt: true, Key: bytes.Repeat([]byte{7}, 32)})
+	if err != nil {
+		f.Fatal(err)
+	}
+	if payload, flags, err := compOnly.outbound(bytes.Repeat([]byte(`{"n":`), 40)); err != nil {
+		f.Fatal(err)
+	} else {
+		f.Add(flags, payload)
+	}
+	if payload, flags, err := encOnly.outbound(bytes.Repeat([]byte("x"), 200)); err != nil {
+		f.Fatal(err)
+	} else {
+		f.Add(flags, payload)
+	}
 	f.Fuzz(func(t *testing.T, flags uint8, data []byte) {
 		var nilTr *transformer
 		for _, tr := range []*transformer{plain, full, nilTr} {
@@ -158,6 +178,11 @@ func FuzzRawPeer(f *testing.F) {
 	f.Add([]byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n"))
 	f.Add(bytes.Repeat([]byte{0x4a, 0x53, 1, 0x0f, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0}, 4))
 	f.Add([]byte{0x4a, 0x53, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0x7b, 0x22, 0x7d}) // 半截 JSON
+	ping, err := (&Frame{Header: Header{Version: ProtocolVersion, Type: TypePing}}).appendTo(nil)
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(append(append([]byte{}, connectSeed...), ping...)) // 握手后心跳：PING→PONG 路径
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		nc, err := net.Dial("tcp", ln.Addr().String())

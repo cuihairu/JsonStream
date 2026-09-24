@@ -835,7 +835,7 @@ func TestServerConnTransformerError(t *testing.T) {
 func TestServerConnackWriteFailure(t *testing.T) {
 	srv, addr := startTestServer(t, shortConfig(), func(s *Server) {
 		// 拖住握手期，给测试留出 RST 连接的窗口
-		s.OnAuth(func(*connectJSON) error {
+		s.OnAuth(func(*ConnectJSON) error {
 			time.Sleep(300 * time.Millisecond)
 			return nil
 		})

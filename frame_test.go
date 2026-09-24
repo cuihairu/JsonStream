@@ -250,7 +250,7 @@ func TestTransformRejectsUnexpectedFlags(t *testing.T) {
 
 func TestHandshakeAuthDenied(t *testing.T) {
 	_, addr := startTestServer(t, shortConfig(), func(s *Server) {
-		s.OnAuth(func(cj *connectJSON) error {
+		s.OnAuth(func(cj *ConnectJSON) error {
 			if cj.Auth != "secret" {
 				return &Error{Code: CodeAuthDenied, Message: "bad token"}
 			}
@@ -276,7 +276,7 @@ func TestHandshakeVersionMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	bad := &connectJSON{Version: int(ProtocolVersion) + 1}
+	bad := &ConnectJSON{Version: int(ProtocolVersion) + 1}
 	f, _ := connectFrame(bad)
 	if err := writeOnce(conn, f); err != nil {
 		t.Fatal(err)
