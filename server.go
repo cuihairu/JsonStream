@@ -430,7 +430,7 @@ func (ss *serverSession) bind(sc *serverConn) {
 	defer ss.mu.Unlock()
 	if ss.conn != nil && ss.conn != sc {
 		// 同会话新连接顶替：废弃旧连接（重连风暴下的 takeover 惯例）。
-		ss.conn.ep.tr.kill(errors.New("session taken over by newer connection"))
+		ss.conn.ep.tr.kill(errors.New("jsonstream: session taken over by newer connection"))
 	}
 	// 迁移仍然活跃的 responder 流（客户端发起，奇数 ID）到新连接的
 	// endpoint（protocol.md §8.1「未终结流」跨恢复存活）：迁移后客户端

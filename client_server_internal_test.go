@@ -229,6 +229,7 @@ func TestClientHandshakeWriteTimeout(t *testing.T) {
 // 对端收下 CONNECT 后直接断开 → 读到 EOF。
 func TestClientHandshakeEOF(t *testing.T) {
 	addr := startRawListener(t, func(c net.Conn) {
+		defer c.Close() // 不显式关则 EOF 要等 GC 终结器，Dial 会等满 DialTimeout
 		br := bufio.NewReader(c)
 		_, _ = ReadFrame(br)
 	})
@@ -238,6 +239,7 @@ func TestClientHandshakeEOF(t *testing.T) {
 // CONNACK 载荷不是 JSON → INVALID。
 func TestClientHandshakeBadConnackPayload(t *testing.T) {
 	addr := startRawListener(t, func(c net.Conn) {
+		defer c.Close()
 		br := bufio.NewReader(c)
 		if f, err := ReadFrame(br); err != nil || f.Type != TypeConnect {
 			return
@@ -251,6 +253,7 @@ func TestClientHandshakeBadConnackPayload(t *testing.T) {
 // 握手期收到非握手帧 → 协议违规。
 func TestClientHandshakeUnexpectedFrame(t *testing.T) {
 	addr := startRawListener(t, func(c net.Conn) {
+		defer c.Close()
 		br := bufio.NewReader(c)
 		if f, err := ReadFrame(br); err != nil || f.Type != TypeConnect {
 			return
@@ -264,6 +267,7 @@ func TestClientHandshakeUnexpectedFrame(t *testing.T) {
 // bindSession 的变换器构造失败（CONNACK 声明加密后的装配路径）。
 func TestClientBindTransformerError(t *testing.T) {
 	addr := startRawListener(t, func(c net.Conn) {
+		defer c.Close()
 		br := bufio.NewReader(c)
 		if f, err := ReadFrame(br); err != nil || f.Type != TypeConnect {
 			return
