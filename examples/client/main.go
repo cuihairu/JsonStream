@@ -1,5 +1,5 @@
 // 命令 client 是 JsonStream 的示例客户端：依次演示请求/响应、流式响应
-// （含中途取消）、单向发送与发布/订阅。运行：
+// （含中途取消）、单向发送、发布/订阅与服务端主动发起的应答。运行：
 //
 //	go run ./examples/client            # 连接默认地址
 //	go run ./examples/client -addr 127.0.0.1:9000
@@ -50,10 +50,14 @@ func run(addr string, demo time.Duration) error {
 	})
 
 	// ---- 发布/订阅：订阅 ticks 主题，后台收广播 ----
-	sub, err := c.Subscribe(ctx, "ticks", func(msg *jsonstream.Message) error {
+	// 跨端调用都带上限：对端不实现该路由或卡死时，无超时的调用会永久
+	// 挂起（demo 是 API 范例，应示范带上限的用法）
+	subCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	sub, err := c.Subscribe(subCtx, "ticks", func(msg *jsonstream.Message) error {
 		log.Printf("broadcast: %s", msg.Payload)
 		return nil
 	})
+	cancel()
 	if err != nil {
 		return err
 	}
@@ -63,7 +67,9 @@ func run(addr string, demo time.Duration) error {
 	var sum struct {
 		Sum int `json:"sum"`
 	}
-	m, err := c.Request(ctx, "math.add", map[string]int{"a": 2, "b": 40})
+	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	m, err := c.Request(reqCtx, "math.add", map[string]int{"a": 2, "b": 40})
+	cancel()
 	if err != nil {
 		return err
 	}
@@ -77,8 +83,10 @@ func run(addr string, demo time.Duration) error {
 	if err != nil {
 		return err
 	}
+	nextCtx, nextCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer nextCancel()
 	for i := 0; i < 2; i++ {
-		msg, ok := stream.Next(ctx)
+		msg, ok := stream.Next(nextCtx)
 		if !ok {
 			break
 		}
