@@ -55,7 +55,9 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("jsonstream: %s(%d): %s", e.Code, e.Code, e.Message)
 }
 
-// IsProtocol 报告该错误是否为协议级错误（对端随后必然断开连接）。
+// IsProtocol 报告该错误是否为协议违规（CodeProtocol）。握手与帧层的
+// 协议违规随后断开连接；分发层的 Flags 声明与 handler 模式不符只终结
+// 所在流，连接继续可用（protocol.md §7.10）。
 func (e *Error) IsProtocol() bool { return e.Code == CodeProtocol }
 
 func errEncode(e *Error) []byte {
