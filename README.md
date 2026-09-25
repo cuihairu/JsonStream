@@ -1,6 +1,6 @@
 # JsonStream
 
-一道面试题的实现：基于 TCP 的自定义 JSON 二进制帧协议，参考 WebSocket 与 RSocket。纯标准库、零第三方依赖，Go ≥ 1.24。协议规范见 [docs/protocol.md](docs/protocol.md)，更细的权衡笔记见 [docs/design-notes.md](docs/design-notes.md)。
+一道面试题的实现：基于 TCP 的自定义 JSON 二进制帧协议，参考 WebSocket 与 RSocket。纯标准库、零第三方依赖，Go ≥ 1.24。协议规范见 [docs/protocol.md](docs/protocol.md)，架构与取舍见 [docs/DESIGN.md](docs/DESIGN.md)，结合实现的知识点梳理见 [docs/NOTES.md](docs/NOTES.md)，协议层的权衡笔记见 [docs/design-notes.md](docs/design-notes.md)。
 
 ## 面试题要求
 
