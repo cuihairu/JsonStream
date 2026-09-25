@@ -213,7 +213,7 @@ func (s *Server) Close() error {
 // ---- 连接处理 ----
 
 func (s *Server) handleConn(nc net.Conn) {
-	defer nc.Close()
+	defer func() { _ = nc.Close() }()
 	_ = nc.SetDeadline(time.Now().Add(s.cfg.DialTimeout))
 
 	br := bufio.NewReader(nc)
