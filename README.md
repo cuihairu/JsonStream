@@ -151,8 +151,9 @@ Stream ID 按发起方分奇偶（客户端奇数、服务端偶数），和 HTT
 
 ### 测试与质量结果
 
-- 语句覆盖率 **100%**（1206/1206，`go test -coverprofile` 实测），155 个测试函数（含 3 个 fuzz 靶），覆盖契约、集成、并发时序构造。
-- `-race -count=3` 全绿；goroutine 泄漏守卫（20 并发客户端回归基线 ±2）。
+- 库包语句覆盖率 **100.0%**（1347/1347，`go test -coverprofile` 实测），CI 有门禁（跌破即失败）。**两个示例包也有测试**：服务端示例 99.0%、客户端示例 96.5%——余下 5 条是"连接恰好在这一瞬间死掉"才失败的窄竞态分支，DESIGN.md §11.3 逐条列了原因，也说明了为什么不为了覆盖率去改示例的形状。
+- 190 个测试/基准函数（含 3 个 fuzz 靶），覆盖契约、集成、并发时序构造；`examples/` 从"零测试的展示代码"变成"被真实客户端端到端跑过"。
+- `-race -count=2` 全绿；goroutine 泄漏守卫（20 并发客户端回归基线 ±2）。
 - 三条 fuzz 靶（帧解析/变换层/握手状态机）长跑累计千万级 execs 零 crash，实锤修复 2 个真 bug（上文 1、2）。
 - 六件静态检查零告警：staticcheck、vet、gofmt、revive、gosec、gocritic；govulncheck 零可触达漏洞；nilness 零告警。
 - 五平台交叉编译通过（windows/darwin × amd64/arm64、linux/arm64，CGO 关）；go.mod 声明的 go 1.24 经真实工具链实测可构建。
@@ -178,7 +179,7 @@ go build ./...
 go test ./...
 go vet ./...
 
-# 覆盖率（应输出 coverage: 100.0% of statements）
+# 覆盖率：库包 100.0%（CI 门禁），examples/server 99.0%，examples/client 96.5%
 go test -cover ./...
 
 # 性能基准

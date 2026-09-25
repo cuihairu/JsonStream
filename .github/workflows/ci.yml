@@ -25,3 +25,12 @@ jobs:
           revive -set_exit_status ./...
       - run: go test -race ./...
       - run: go test -bench . -benchtime 1x ./...
+      # 覆盖率门禁只针对库包：examples/ 里有若干"只能在微秒级竞态里触发"的
+      # 防御分支（示例是文档，不为覆盖率改形）。库包必须保持 100%——它没有
+      # 任何"测不到就是死码"的托词，测试接缝已覆盖全部防御分支。
+      - name: coverage gate (library = 100%)
+        run: |
+          go test -coverprofile=coverage.out .
+          pct=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/, "", $3); print $3}')
+          echo "library coverage: ${pct}%"
+          awk -v p="$pct" 'BEGIN { if (p+0 < 100) { printf "coverage %.1f%% < 100%%\n", p; exit 1 } }'
