@@ -29,6 +29,17 @@ func FuzzReadFrame(f *testing.F) {
 	f.Add([]byte{0x4a, 0x53, 1, 0x1f, 3, 0, 0, 0, 0, 1, 0xff, 0xff, 0xff, 0xff}) // 保留位+payload 超限
 	f.Add([]byte{0x00, 0x00, 1, 0, 3, 0, 0, 0, 0, 1, 0, 0, 0, 0})                // 坏魔数
 	f.Add([]byte{0x4a, 0x53, 9, 0, 99, 0, 0, 0, 0, 1, 0, 0, 0, 0})               // 坏版本+坏类型
+	// metaLen 恰为 MaxMetadataSize：off-by-one 真 bug（uint16 截断）的
+	// 触发边界，fuzz 从「恰好合法」出发突变最有价值
+	big, err := (&Frame{
+		Header:   Header{Version: ProtocolVersion, Type: TypeRequest, Flags: FlagHasMeta, StreamID: 7},
+		Metadata: bytes.Repeat([]byte{'a'}, MaxMetadataSize),
+		Payload:  []byte(`{}`),
+	}).appendTo(nil)
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(big)
 	f.Fuzz(func(t *testing.T, data []byte) {
 		f1, err := ReadFrame(bytes.NewReader(data))
 		if err != nil {
