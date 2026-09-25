@@ -65,6 +65,27 @@ func main() {
 		return nil
 	})
 
+	// ---- 双工：双向多帧，"我说完了"是半关闭（COMPLETE），对端 Cancel 才是终结 ----
+	srv.HandleChannel("chat", func(ch *jsonstream.Channel) error {
+		for {
+			// 阻塞等对端是双工的正常态；对端 Close/Cancel 或断连让
+			// Receive 返回错误，循环随之收尾
+			m, err := ch.Receive(context.Background())
+			if err != nil {
+				return err
+			}
+			var msg struct {
+				Text string `json:"text"`
+			}
+			if err := m.Decode(&msg); err != nil {
+				return err
+			}
+			if err := ch.Send(map[string]string{"ack": "got: " + msg.Text}); err != nil {
+				return err
+			}
+		}
+	})
+
 	// ---- 单向：永不回帧（ONEWAY 无响应、无错误帧） ----
 	srv.HandleOneWay("notify", func(msg *jsonstream.Message) error {
 		log.Printf("oneway notify: %s", msg.Payload)

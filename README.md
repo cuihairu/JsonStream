@@ -189,7 +189,7 @@ go test -run '^$' -fuzz FuzzReadFrame -fuzztime 30s .
 
 # 端到端示例：终端 1 启动服务端
 go run ./examples/server
-# 终端 2 运行客户端（请求/响应、流式取消、单向、发布/订阅、服务端主动发起）
+# 终端 2 运行客户端（请求/响应、流式取消、双工、单向、发布/订阅、服务端主动发起）
 go run ./examples/client
 ```
 

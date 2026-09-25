@@ -1,5 +1,5 @@
 // 命令 client 是 JsonStream 的示例客户端：依次演示请求/响应、流式响应
-// （含中途取消）、单向发送、发布/订阅与服务端主动发起的应答。运行：
+// （含中途取消）、双工通道、单向发送、发布/订阅与服务端主动发起的应答。运行：
 //
 //	go run ./examples/client            # 连接默认地址
 //	go run ./examples/client -addr 127.0.0.1:9000
@@ -96,6 +96,25 @@ func run(addr string, demo time.Duration) error {
 		return err
 	}
 	log.Printf("range cancelled after 2 items")
+
+	// ---- 双工：双方都可发多帧；Close 是半关闭（"我发完了"） ----
+	ch, err := c.Channel(ctx, "chat", nil)
+	if err != nil {
+		return err
+	}
+	if err := ch.Send(map[string]string{"text": "ping"}); err != nil {
+		return err
+	}
+	chCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ack, err := ch.Receive(chCtx)
+	cancel()
+	if err != nil {
+		return err
+	}
+	log.Printf("chat ack: %s", ack.Payload)
+	if err := ch.Close(); err != nil {
+		return err
+	}
 
 	// ---- 单向发送 + 客户端 → 服务端主题发布 ----
 	if err := c.SendOneWay("notify", map[string]string{"text": "fire and forget"}); err != nil {
