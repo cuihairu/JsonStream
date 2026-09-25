@@ -2660,3 +2660,48 @@ func TestViewCloseIdempotent(t *testing.T) {
 		t.Fatal("session id must survive Close")
 	}
 }
+
+// TestRouteKindMismatchKeepsConnectionAlive 钉住 protocol.md §7.10 惯例句的
+// 语义层分界：请求的 Flags 声明与路由注册的 handler 类型不符回
+// ERROR(PROTOCOL)，但只终结该流——连接必须继续可用（一个路由打错不应
+// 杀掉全连接）。此前该路径只有语句覆盖、无任何行为断言。
+func TestRouteKindMismatchKeepsConnectionAlive(t *testing.T) {
+	_, addr := startTestServer(t, shortConfig(), func(s *Server) {
+		s.Handle("echo", func(req *Request) (any, error) { return "ok", nil })
+		s.HandleStream("range", func(req *Request, em Emitter) error {
+			return em.Emit(map[string]int{"n": 1})
+		})
+	})
+
+	ctx := context.Background()
+	c := dialTest(t, addr, shortConfig())
+
+	// 流式请求打 req/res 路由 → ERROR(PROTOCOL) 终结该流
+	st, err := c.Stream(ctx, "echo", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := st.Next(ctx); ok {
+		t.Fatal("expected stream to fail on kind mismatch")
+	}
+	var je *Error
+	if !errors.As(st.Err(), &je) || je.Code != CodeProtocol {
+		t.Fatalf("want PROTOCOL, got %v", st.Err())
+	}
+
+	// 反向：req/res 打流式路由 → 同样 PROTOCOL 终结
+	_, err = c.Request(ctx, "range", nil)
+	if !errors.As(err, &je) || je.Code != CodeProtocol {
+		t.Fatalf("want PROTOCOL, got %v", err)
+	}
+
+	// 连接存活：正常请求照常成功
+	m, err := c.Request(ctx, "echo", nil)
+	if err != nil {
+		t.Fatalf("connection must survive kind mismatch: %v", err)
+	}
+	var got string
+	if err := m.Decode(&got); err != nil || got != "ok" {
+		t.Fatalf("want ok, got %q err=%v", got, err)
+	}
+}
