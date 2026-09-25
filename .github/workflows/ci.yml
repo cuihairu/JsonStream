@@ -1,4 +1,4 @@
-# 只做验证，不做发布：每次推送/PR 跑 vet + 竞态测试 + 基准冒烟。
+# 只做验证，不做发布：每次推送/PR 跑 vet + 静态检查 + 竞态测试 + 基准冒烟。
 name: ci
 
 on:
@@ -15,5 +15,13 @@ jobs:
         with:
           go-version: '1.24'
       - run: go vet ./...
+      # gosec 固定版本（新版规则漂移不打断 CI）；零告警基线含带理由的
+      # #nosec 声明，从 CI 起受门禁保护。
+      - run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
+          gosec -quiet ./...
+      - run: |
+          go install github.com/mgechev/revive@latest
+          revive -set_exit_status ./...
       - run: go test -race ./...
       - run: go test -bench . -benchtime 1x ./...

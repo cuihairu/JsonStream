@@ -2667,8 +2667,8 @@ func TestViewCloseIdempotent(t *testing.T) {
 // 杀掉全连接）。此前该路径只有语句覆盖、无任何行为断言。
 func TestRouteKindMismatchKeepsConnectionAlive(t *testing.T) {
 	_, addr := startTestServer(t, shortConfig(), func(s *Server) {
-		s.Handle("echo", func(req *Request) (any, error) { return "ok", nil })
-		s.HandleStream("range", func(req *Request, em Emitter) error {
+		s.Handle("echo", func(_ *Request) (any, error) { return "ok", nil })
+		s.HandleStream("range", func(_ *Request, em Emitter) error {
 			return em.Emit(map[string]int{"n": 1})
 		})
 	})
