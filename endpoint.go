@@ -369,8 +369,8 @@ func (ep *endpoint) doRequest(ctx context.Context, route string, payload any) (*
 			return toMessage(rf), nil
 		default:
 		}
-		if flw.err != nil {
-			return nil, flw.err
+		if _, err := flw.doneState(); err != nil {
+			return nil, err
 		}
 		return nil, ErrClosed
 	case <-ctx.Done():
@@ -438,8 +438,8 @@ func (ep *endpoint) doSubscribe(ctx context.Context, topic string, h func(*Messa
 	case <-flw.ackCh:
 	case <-flw.doneCh:
 		ep.unregisterFlow(flw)
-		if flw.err != nil {
-			return nil, flw.err
+		if _, err := flw.doneState(); err != nil {
+			return nil, err
 		}
 		return nil, ErrClosed
 	case <-ctx.Done():

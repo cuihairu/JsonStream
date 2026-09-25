@@ -54,8 +54,8 @@ func (c streamContext) Value(any) any               { return nil }
 func (c streamContext) Err() error {
 	select {
 	case <-c.f.doneCh:
-		if c.f.err != nil {
-			return c.f.err
+		if _, err := c.f.doneState(); err != nil {
+			return err
 		}
 		return &Error{Code: CodeCancelled, Message: "stream closed"}
 	default:
@@ -82,14 +82,14 @@ func (e *emitter) Emit(v any) error {
 		return err
 	}
 	// 流已终结（对端 CANCEL/会话终结）时立即失败：不依赖额度闸门，让
-	// 未启用 Credit 的 handler 也能感知取消并收尾。
-	select {
-	case <-e.flw.doneCh:
-		if e.flw.err != nil {
-			return e.flw.err
+	// 未启用 Credit 的 handler 也能感知取消并收尾。doneState 一次锁内
+	// 原子读（终止态与错误配对），不走 select 探测——裸读 err 与读循环
+	// 的 finish 写是数据竞争（CI race 实锤）。
+	if done, err := e.flw.doneState(); done {
+		if err != nil {
+			return err
 		}
 		return &Error{Code: CodeCancelled, Message: "stream closed"}
-	default:
 	}
 	// 连接级额度闸门随连接终结：断开期间的下行帧改道会话保留队列
 	// （at-least-once），额度不足（ErrClosed，含阻塞中连接死亡）不拦截；

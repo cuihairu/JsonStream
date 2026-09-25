@@ -117,6 +117,16 @@ func (flw *flow) complete() { flw.finish(nil) }
 
 func (flw *flow) fail(e *Error) { flw.finish(e) }
 
+// doneState 原子返回 (是否已终结, 终结错误)。err 只在 finish 的锁内写入，
+// 所有读取都必须走这把锁：仅凭收到 doneCh 关闭信号再读虽然按 happens-before
+// 安全，但与「select default 先探测后读」的分支混用时极易漏锁（CI race
+// 实锤：Err() 裸读与读循环 finish 写竞争），故统一收口于此。
+func (flw *flow) doneState() (bool, *Error) {
+	flw.mu.Lock()
+	defer flw.mu.Unlock()
+	return flw.done, flw.err
+}
+
 // setEndpoint 会话恢复迁移时换绑当前连接的 endpoint。读写都以 mu 保护：
 // 迁移与用户 goroutine 的出站（Send/Cancel/Close）及消费侧记账
 // （creditIn/release）和终结（finish）之间没有任何别的同步关系。
@@ -177,7 +187,7 @@ func (s *ReadStream) Next(ctx context.Context) (*Message, bool) {
 		s.f.release(1)
 		// 取帧后流可能已带着错误终结（CANCEL/ERROR 与取帧竞态）：
 		// 立即终结语义优先，返回剩余帧会让调用方误以为流仍在继续。
-		if s.f.isDone() && s.f.err != nil {
+		if done, err := s.f.doneState(); done && err != nil {
 			return nil, false
 		}
 		return toMessage(f), true
@@ -188,7 +198,7 @@ func (s *ReadStream) Next(ctx context.Context) (*Message, bool) {
 		// 正常 COMPLETE 终结后先排空余帧（终结与交付异步，select 双就绪
 		// 随机选择，直接返回会随机丢帧）；CANCEL/ERROR 属立即终结，
 		// 在途帧语义上作废，不排空。
-		if s.f.err != nil {
+		if _, err := s.f.doneState(); err != nil {
 			return nil, false
 		}
 		select {
@@ -203,10 +213,14 @@ func (s *ReadStream) Next(ctx context.Context) (*Message, bool) {
 
 // Err 返回终结错误；正常终结返回 nil。
 func (s *ReadStream) Err() error {
-	if s == nil || s.f.err == nil {
+	if s == nil {
 		return nil
 	}
-	return s.f.err
+	_, err := s.f.doneState()
+	if err == nil {
+		return nil
+	}
+	return err
 }
 
 // Cancel 取消流：发 CANCEL 并本地终结。帧经当前 endpoint 发送——会话恢复
@@ -259,13 +273,13 @@ func (c *Channel) Receive(ctx context.Context) (*Message, error) {
 	select {
 	case f := <-c.f.frames:
 		c.f.release(1)
-		if c.f.isDone() && c.f.err != nil {
-			return nil, c.f.err
+		if done, err := c.f.doneState(); done && err != nil {
+			return nil, err
 		}
 		return toMessage(f), nil
 	case <-c.f.doneCh:
-		if c.f.err != nil {
-			return nil, c.f.err
+		if _, err := c.f.doneState(); err != nil {
+			return nil, err
 		}
 		// 对端正常 COMPLETE：先排空余帧（终结与交付异步），再报 EOF。
 		select {
