@@ -31,6 +31,19 @@ jobs:
       # 推送会拿到"全绿但什么都没跑"的结果。实测（DESIGN §11.5）：第二次
       # `go test -race ./...` 输出 (cached)。门禁要能证明自己跑过。
       - run: go test -race -count=1 ./...
+      # 交叉编译冒烟放在老腿：这道门禁证明的是"go.mod 声明的最老支持版本
+      # 上，五个目标平台全部可构建"——最老工具链上能过，对更新工具链是更强
+      # 的保证（README 的"五平台交叉编译通过"由此落地为门禁）。CGO 显式关：
+      # 纯标准库仓库没有 cgo 依赖，交叉编译本来就不该碰 C 工具链。GOOS/
+      # GOARCH 在构建缓存键里互不共享，五平台首跑各要重编一遍 stdlib，此后
+      # 命中 setup-go 恢复的 GOCACHE 就快了。
+      - name: cross-compile smoke (5 platforms)
+        run: |
+          set -euo pipefail
+          for platform in windows/amd64 windows/arm64 darwin/amd64 darwin/arm64 linux/arm64; do
+            GOOS="${platform%/*}" GOARCH="${platform#*/}" CGO_ENABLED=0 go build ./...
+            echo "build ok: $platform"
+          done
 
       # ---- 以下全部只在 stable 腿跑：工具兼容性绑 stable，门禁成本只付一份 ----
 
