@@ -23,14 +23,20 @@ jobs:
       - run: |
           go install github.com/mgechev/revive@latest
           revive -set_exit_status ./...
-      - run: go test -race ./...
+      # -count=1 不是冗余：setup-go 默认开 cache（keyed on go.sum），GOCACHE
+      # 命中时 go test 直接报 (cached) 并不执行任何测试——只改文档/工作流的
+      # 推送会拿到"全绿但什么都没跑"的结果。实测（DESIGN §11.5）：第二次
+      # `go test -race ./...` 输出 (cached)。门禁要能证明自己跑过。
+      - run: go test -race -count=1 ./...
       - run: go test -bench . -benchtime 1x ./...
       # 覆盖率门禁只针对库包：examples/ 里有若干"只能在微秒级竞态里触发"的
       # 防御分支（示例是文档，不为覆盖率改形）。库包必须保持 100%——它没有
       # 任何"测不到就是死码"的托词，测试接缝已覆盖全部防御分支。
+      # -count=1 同上：覆盖率 profile 也进测试缓存，复用旧 profile 等于用
+      # 上一次的结果冒充这次的证据。
       - name: coverage gate (library = 100%)
         run: |
-          go test -coverprofile=coverage.out .
+          go test -coverprofile=coverage.out -count=1 .
           pct=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/, "", $3); print $3}')
           echo "library coverage: ${pct}%"
           awk -v p="$pct" 'BEGIN { if (p+0 < 100) { printf "coverage %.1f%% < 100%%\n", p; exit 1 } }'
@@ -41,13 +47,13 @@ jobs:
       # 靶名用 `go test -list` 发现而不是手写：新增 fuzz 靶不需要改 CI，
       # 也就不会"静默不跑"（覆盖率门禁那种承诺腐烂的同款风险）。
       #
-      # 预算 20s/靶是 CI 能接受的探索量，不是"无崩溃"的证明：三靶合计
-      # 约 44 万次变异（实测 i9-10880H/12 worker，见 DESIGN §11.4），而
-      # README bug 清单 1、2 两个真 bug 是本机单靶深挖（分钟级、百万级
-      # execs）才撞出来的。也不带 -race：race detector 下变异吞吐掉一个
-      # 数量级，同样的墙钟预算只能换到 1/10 的探索量，而这一步的目标是
-      # "panic 与契约不变量的廉价回归网"——竞态由上面那条 `-race` 全量
-      # 跑负责，两者分工不同。
+      # 预算 20s/靶是 CI 能接受的探索量，不是"无崩溃"的证明：本地实测三靶
+      # 合计落在"十万次变异"量级（绝对吞吐是 CPU 供给的函数，跨机器差到
+      # 数倍，别当基线用；区间口径见 DESIGN §11.4），而 README bug 清单
+      # 1、2 两个真 bug 是单靶深挖（分钟级）才撞出来的。也不带 -race：race
+      # detector 下变异吞吐掉一个数量级，同样的墙钟预算只能换到 1/10 的
+      # 探索量，而这一步的目标是"panic 与契约不变量的廉价回归网"——竞态
+      # 由上面那条 `-race` 全量跑负责，两者分工不同。
       - name: fuzz smoke (20s per target)
         run: |
           set -euo pipefail
