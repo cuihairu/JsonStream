@@ -155,7 +155,7 @@ Stream ID 按发起方分奇偶（客户端奇数、服务端偶数），和 HTT
 - 199 个测试/基准函数（187 测试 + 9 基准 + 3 fuzz 靶），覆盖契约、集成、并发时序构造；`examples/` 从"零测试的展示代码"变成"被真实客户端端到端跑过"。
 - `-race -count=2` 全绿；goroutine 泄漏守卫（20 并发客户端回归基线 ±2）。
 - 三条 fuzz 靶（帧解析/变换层/握手状态机）长跑累计千万级 execs 零 crash，实锤修复 2 个真 bug（上文 1、2）。CI 里还有一层 fuzz 冒烟：靶名自动发现、每靶固定 20s 预算、崩溃即失败并把 crash 语料落成 `testdata/fuzz/` 回归用例（DESIGN §11.4）。
-- 六件静态检查零告警：staticcheck、vet、gofmt、revive、gosec、gocritic；govulncheck 零可触达漏洞；nilness 零告警。
+- 六件静态检查零告警：staticcheck、vet、gofmt、revive、gosec、gocritic；govulncheck 零可触达漏洞；nilness 零告警——**全部已纳入 CI 门禁**（双工具链腿：1.24 证 go.mod 的最老支持版本可构建可测试，stable 腿承载工具，工具全部钉在实测兼容的版本）。
 - 五平台交叉编译通过（windows/darwin × amd64/arm64、linux/arm64，CGO 关）；go.mod 声明的 go 1.24 经真实工具链实测可构建。
 
 性能（`go test -bench . -benchtime 2s`，i9-10880H / Go 1.24，量级参考）：

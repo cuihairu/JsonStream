@@ -1,4 +1,9 @@
-# 只做验证，不做发布：每次推送/PR 跑 vet + 静态检查 + 竞态测试 + 基准冒烟 + 覆盖率门禁 + fuzz 冒烟。
+# 只做验证，不做发布。双工具链腿：
+#   1.24 腿——go.mod 声明的最老支持版本，证明"1.24 可构建可测试"不是口头禅；
+#   stable 腿——承载全部静态工具与门禁。工具与工具链的 export data 存在版本
+#   耦合（老工具读不懂新工具链的 export data，实测 staticcheck 2025.1.1 对
+#   go1.27 报 "export data version" 错），所以工具全部钉版本且只在 stable
+#   腿跑；将来 stable 升级导致某个工具报错时，升那一个工具的钉版即可。
 name: ci
 
 on:
@@ -9,32 +14,81 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # 双腿全量 race + 六件工具 + fuzz 冒烟的最坏组合也远小于默认 360 分钟；
+    # 显式上限防卡死的 runner 烧配额。
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        go: ['1.24', 'stable']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: ${{ matrix.go }}
       - run: go vet ./...
-      # gosec 固定版本（新版规则漂移不打断 CI）；零告警基线含带理由的
-      # #nosec 声明，从 CI 起受门禁保护。
-      - run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
-          gosec -quiet ./...
-      - run: |
-          go install github.com/mgechev/revive@latest
-          revive -set_exit_status ./...
       # -count=1 不是冗余：setup-go 默认开 cache（keyed on go.sum），GOCACHE
       # 命中时 go test 直接报 (cached) 并不执行任何测试——只改文档/工作流的
       # 推送会拿到"全绿但什么都没跑"的结果。实测（DESIGN §11.5）：第二次
       # `go test -race ./...` 输出 (cached)。门禁要能证明自己跑过。
       - run: go test -race -count=1 ./...
-      - run: go test -bench . -benchtime 1x ./...
+
+      # ---- 以下全部只在 stable 腿跑：工具兼容性绑 stable，门禁成本只付一份 ----
+
+      # gofmt 是六件静态检查里唯一"随工具链走"的（无独立工具版本），新版
+      # gofmt 可能有新格式规则，所以跟其他工具一起放 stable 腿。
+      - name: Check formatting
+        if: matrix.go == 'stable'
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      # gosec 固定版本（新版规则漂移不打断 CI）；零告警基线含带理由的
+      # #nosec 声明，从 CI 起受门禁保护。
+      - name: gosec
+        if: matrix.go == 'stable'
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
+          gosec -quiet ./...
+      # revive 同样钉版本：@latest 意味着上游新增一条规则这个仓库就红一次，
+      # 而那次红与本次推送的改动无关——门禁的每次失败都必须可归因。
+      - name: revive
+        if: matrix.go == 'stable'
+        run: |
+          go install github.com/mgechev/revive@v1.17.0
+          revive -set_exit_status ./...
+      # staticcheck 必须与工具链配套：老版本读不懂新工具链的 export data
+      # （实测 2025.1.1 对 go1.27 报 "export data version 4 is greater than
+      # maximum supported version 2"），2026.2.1 是与 stable 实测兼容的钉版。
+      - name: staticcheck
+        if: matrix.go == 'stable'
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
+          staticcheck ./...
+      - name: gocritic
+        if: matrix.go == 'stable'
+        run: |
+          go install github.com/go-critic/go-critic/cmd/gocritic@v0.15.0
+          gocritic check ./...
+      # nilness 随 x/tools 走，按模块版本钉（与 stable 实测兼容）。
+      - name: nilness
+        if: matrix.go == 'stable'
+        run: |
+          go install golang.org/x/tools/go/analysis/passes/nilness/cmd/nilness@v0.50.0
+          nilness ./...
+      # govulncheck 连 vuln.go.dev 比对"可触达"漏洞（有调用路径才算数）。
+      - name: govulncheck
+        if: matrix.go == 'stable'
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          govulncheck ./...
+      - name: bench smoke
+        if: matrix.go == 'stable'
+        run: go test -bench . -benchtime 1x ./...
       # 覆盖率门禁只针对库包：examples/ 里有若干"只能在微秒级竞态里触发"的
       # 防御分支（示例是文档，不为覆盖率改形）。库包必须保持 100%——它没有
       # 任何"测不到就是死码"的托词，测试接缝已覆盖全部防御分支。
       # -count=1 同上：覆盖率 profile 也进测试缓存，复用旧 profile 等于用
-      # 上一次的结果冒充这次的证据。
+      # 上一次的结果冒充这次的证据。门禁会重跑一遍测试，这份成本只付在
+      # stable 腿。
       - name: coverage gate (library = 100%)
+        if: matrix.go == 'stable'
         run: |
           go test -coverprofile=coverage.out -count=1 .
           pct=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/, "", $3); print $3}')
@@ -57,6 +111,7 @@ jobs:
       # 探索量，而这一步的目标是"panic 与契约不变量的廉价回归网"——竞态
       # 由上面那条 `-race` 全量跑负责，两者分工不同。
       - name: fuzz smoke (20s per target)
+        if: matrix.go == 'stable'
         run: |
           set -euo pipefail
           found=0
