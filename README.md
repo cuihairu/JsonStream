@@ -185,9 +185,11 @@ go test -cover ./...
 # 性能基准
 go test -bench . -benchtime 2s
 
-# fuzz 冒烟（CI 同款：自动发现全部靶，每靶 20s）
-for t in $(go test -list 'Fuzz.*' . | grep '^Fuzz'); do
-  go test -run '^$' -fuzz "^${t}$" -fuzztime 20s .
+# fuzz 冒烟（CI 同款：逐包自动发现全部靶，每靶 20s）
+for pkg in $(go list ./...); do
+  for t in $(go test -list 'Fuzz.*' "$pkg" | grep '^Fuzz'); do
+    go test -run '^$' -fuzz "^${t}$" -fuzztime 20s "$pkg"
+  done
 done
 
 # fuzz 深挖单靶（注意 -fuzz 只接受单个包，./... 会报错）

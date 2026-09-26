@@ -45,7 +45,9 @@ jobs:
       # testdata/fuzz/<Target>/——提交回来就是一条永久回归用例。
       #
       # 靶名用 `go test -list` 发现而不是手写：新增 fuzz 靶不需要改 CI，
-      # 也就不会"静默不跑"（覆盖率门禁那种承诺腐烂的同款风险）。
+      # 也就不会"静默不跑"（覆盖率门禁那种承诺腐烂的同款风险）。逐包扫而
+      # 不是只扫根包——`go test -list 'Fuzz.*' .` 只看根包，靶挪进子包
+      # （或干脆新开一个包）就会被静默漏掉，正好是这一步要根除的那个风险。
       #
       # 预算 20s/靶是 CI 能接受的探索量，不是"无崩溃"的证明：本地实测三靶
       # 合计落在"十万次变异"量级（绝对吞吐是 CPU 供给的函数，跨机器差到
@@ -57,11 +59,15 @@ jobs:
       - name: fuzz smoke (20s per target)
         run: |
           set -euo pipefail
-          targets=$(go test -list 'Fuzz.*' . | grep '^Fuzz' || true)
-          if [ -z "$targets" ]; then
+          found=0
+          for pkg in $(go list ./...); do
+            for t in $(go test -list 'Fuzz.*' "$pkg" | grep '^Fuzz' || true); do
+              found=$((found + 1))
+              echo "fuzzing $t ($pkg)"
+              go test -run '^$' -fuzz "^${t}\$" -fuzztime 20s "$pkg"
+            done
+          done
+          if [ "$found" -eq 0 ]; then
             echo "no fuzz targets discovered -- the step would silently pass forever"; exit 1
           fi
-          for t in $targets; do
-            echo "fuzzing $t"
-            go test -run '^$' -fuzz "^${t}\$" -fuzztime 20s .
-          done
+          echo "fuzzed $found target(s)"
