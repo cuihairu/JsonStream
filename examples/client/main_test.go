@@ -63,8 +63,6 @@ type serverOpts struct {
 	omit         map[string]bool // 不注册的路由（制造 NOT_FOUND）
 	mathAddReply string          // math.add 的响应 JSON
 	chatErr      bool            // chat handler 直接返回错误
-	closeAfter   string          // 该路由被调用后延迟掐断连接
-	dropDelay    time.Duration   // 掐断前的延迟；负值表示用默认 20ms
 	stallRange   bool            // range 只发一帧就停住，稍后掐断连接
 	retention    time.Duration   // 会话保留期；-1 表示禁用恢复
 }
@@ -90,25 +88,12 @@ func startDemoServer(t *testing.T, o serverOpts) *demoServer {
 	stall := make(chan struct{})
 	t.Cleanup(func() { close(stall) })
 
-	// killSoon 在路由被调用后延迟掐断，让当前这一步的响应先落地。
-	killSoon := func() {
-		if o.closeAfter == "" {
-			return
-		}
-		d := o.dropDelay
-		if d < 0 {
-			d = 20 * time.Millisecond
-		}
-		time.AfterFunc(d, ln.dropAll)
-	}
-
 	if !o.omit["math.add"] {
 		reply := o.mathAddReply
 		if reply == "" {
 			reply = `{"sum":42}`
 		}
 		srv.Handle("math.add", func(*jsonstream.Request) (any, error) {
-			killSoon()
 			return json.RawMessage(reply), nil
 		})
 	}
@@ -131,7 +116,6 @@ func startDemoServer(t *testing.T, o serverOpts) *demoServer {
 					return err
 				}
 			}
-			killSoon()
 			return nil
 		})
 	}

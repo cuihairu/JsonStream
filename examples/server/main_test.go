@@ -141,8 +141,9 @@ func TestServeReturnsWhenListenerDies(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- serve(context.Background(), o) }()
 
-	// 等 serve 真正进入 Serve 循环再拆台子。
-	waitFor(t, "serve to start", func() bool { return len(raw.Addr().String()) > 0 })
+	// 关监听器的时机与 serve 的进度无关紧要：无论 Close 落在 Serve 的
+	// Accept 之前还是之后，Accept 都会立即报错返回——测试对两种顺序
+	// 一视同仁，所以不做任何同步。
 	if err := raw.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -405,9 +406,11 @@ func TestNotifyLoopSuccessAndRequestError(t *testing.T) {
 		return notices > 0
 	})
 
-	// 第二个客户端什么都不注册：notify 的 Request 必然 NOT_FOUND。
+	// 第二个客户端什么都不注册：notify 周期（20ms）运行期间它在线，
+	// Request 必然 NOT_FOUND——错误分支发生在 serve 的 goroutine 里，
+	// 这里只需保证它的握手已完成。
 	bare := rs.dial(t)
-	waitFor(t, "the bare client to be seen by Sessions", func() bool {
+	waitFor(t, "the bare client's handshake", func() bool {
 		return len(bare.SessionID()) > 0
 	})
 }
