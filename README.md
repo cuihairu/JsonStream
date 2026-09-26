@@ -154,7 +154,7 @@ Stream ID 按发起方分奇偶（客户端奇数、服务端偶数），和 HTT
 - 库包语句覆盖率 **100.0%**（1347/1347，`go test -coverprofile` 实测），CI 有门禁（跌破即失败）。**两个示例包也有测试**：服务端示例 99.0%、客户端示例 96.5%——余下 5 条是"连接恰好在这一瞬间死掉"才失败的窄竞态分支，DESIGN.md §11.3 逐条列了原因，也说明了为什么不为了覆盖率去改示例的形状。
 - 199 个测试/基准函数（187 测试 + 9 基准 + 3 fuzz 靶），覆盖契约、集成、并发时序构造；`examples/` 从"零测试的展示代码"变成"被真实客户端端到端跑过"。
 - `-race -count=2` 全绿；goroutine 泄漏守卫（20 并发客户端回归基线 ±2）。
-- 三条 fuzz 靶（帧解析/变换层/握手状态机）长跑累计千万级 execs 零 crash，实锤修复 2 个真 bug（上文 1、2）。
+- 三条 fuzz 靶（帧解析/变换层/握手状态机）长跑累计千万级 execs 零 crash，实锤修复 2 个真 bug（上文 1、2）。CI 里还有一层 fuzz 冒烟：靶名自动发现、每靶固定 20s 预算、崩溃即失败并把 crash 语料落成 `testdata/fuzz/` 回归用例（DESIGN §11.4）。
 - 六件静态检查零告警：staticcheck、vet、gofmt、revive、gosec、gocritic；govulncheck 零可触达漏洞；nilness 零告警。
 - 五平台交叉编译通过（windows/darwin × amd64/arm64、linux/arm64，CGO 关）；go.mod 声明的 go 1.24 经真实工具链实测可构建。
 
@@ -185,8 +185,13 @@ go test -cover ./...
 # 性能基准
 go test -bench . -benchtime 2s
 
-# fuzz 单靶（注意 -fuzz 只接受单个包，./... 会报错）
-go test -run '^$' -fuzz FuzzReadFrame -fuzztime 30s .
+# fuzz 冒烟（CI 同款：自动发现全部靶，每靶 20s）
+for t in $(go test -list 'Fuzz.*' . | grep '^Fuzz'); do
+  go test -run '^$' -fuzz "^${t}$" -fuzztime 20s .
+done
+
+# fuzz 深挖单靶（注意 -fuzz 只接受单个包，./... 会报错）
+go test -run '^$' -fuzz FuzzReadFrame -fuzztime 300s .
 
 # 端到端示例：终端 1 启动服务端
 go run ./examples/server

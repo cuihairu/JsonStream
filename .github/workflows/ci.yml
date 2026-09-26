@@ -1,4 +1,4 @@
-# 只做验证，不做发布：每次推送/PR 跑 vet + 静态检查 + 竞态测试 + 基准冒烟。
+# 只做验证，不做发布：每次推送/PR 跑 vet + 静态检查 + 竞态测试 + 基准冒烟 + 覆盖率门禁 + fuzz 冒烟。
 name: ci
 
 on:
@@ -34,3 +34,28 @@ jobs:
           pct=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/, "", $3); print $3}')
           echo "library coverage: ${pct}%"
           awk -v p="$pct" 'BEGIN { if (p+0 < 100) { printf "coverage %.1f%% < 100%%\n", p; exit 1 } }'
+      # 种子语料随上面的 go test 常规跑过了，这一步是真正的挖掘：每个 fuzz
+      # 靶按固定预算随机变异，崩溃即失败，并把 crash 语料写进
+      # testdata/fuzz/<Target>/——提交回来就是一条永久回归用例。
+      #
+      # 靶名用 `go test -list` 发现而不是手写：新增 fuzz 靶不需要改 CI，
+      # 也就不会"静默不跑"（覆盖率门禁那种承诺腐烂的同款风险）。
+      #
+      # 预算 20s/靶是 CI 能接受的探索量，不是"无崩溃"的证明：三靶合计
+      # 约 44 万次变异（实测 i9-10880H/12 worker，见 DESIGN §11.4），而
+      # README bug 清单 1、2 两个真 bug 是本机单靶深挖（分钟级、百万级
+      # execs）才撞出来的。也不带 -race：race detector 下变异吞吐掉一个
+      # 数量级，同样的墙钟预算只能换到 1/10 的探索量，而这一步的目标是
+      # "panic 与契约不变量的廉价回归网"——竞态由上面那条 `-race` 全量
+      # 跑负责，两者分工不同。
+      - name: fuzz smoke (20s per target)
+        run: |
+          set -euo pipefail
+          targets=$(go test -list 'Fuzz.*' . | grep '^Fuzz' || true)
+          if [ -z "$targets" ]; then
+            echo "no fuzz targets discovered -- the step would silently pass forever"; exit 1
+          fi
+          for t in $targets; do
+            echo "fuzzing $t"
+            go test -run '^$' -fuzz "^${t}\$" -fuzztime 20s .
+          done
