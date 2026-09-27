@@ -22,9 +22,11 @@
 | [题目要求](docs/interview-requirements.md) | [interview-requirements](https://cuihairu.github.io/jsonstream/interview-requirements) |
 | [与 WebSocket 对照](docs/websocket-comparison.md) | [websocket-comparison](https://cuihairu.github.io/jsonstream/websocket-comparison) |
 | [TCP 流特性与协议横评](docs/tcp-and-landscape.md) | [tcp-and-landscape](https://cuihairu.github.io/jsonstream/tcp-and-landscape) |
-| [架构与取舍](docs/DESIGN.md) | [design](https://cuihairu.github.io/jsonstream/design) |
+| [架构与取舍](docs/DESIGN.md) | [DESIGN](https://cuihairu.github.io/jsonstream/DESIGN) |
 | [设计笔记](docs/design-notes.md) | [design-notes](https://cuihairu.github.io/jsonstream/design-notes) |
-| [知识点梳理](docs/NOTES.md) | [notes](https://cuihairu.github.io/jsonstream/notes) |
+| [知识点梳理](docs/NOTES.md) | [NOTES](https://cuihairu.github.io/jsonstream/NOTES) |
+
+## 设计与知识点
 
 本节讲协议设计的逐点依据：帧格式、交互模型、元数据分离、心跳、断线恢复、压缩加密、背压、pub/sub 混用与实测教训。与 WebSocket 的能力对照，摘成三行——
 
