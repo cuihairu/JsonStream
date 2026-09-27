@@ -108,6 +108,17 @@ jobs:
           pct=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/, "", $3); print $3}')
           echo "library coverage: ${pct}%"
           awk -v p="$pct" 'BEGIN { if (p+0 < 100) { printf "coverage %.1f%% < 100%%\n", p; exit 1 } }'
+      # Codecov 上传与 100% 门禁解耦：覆盖率跌破由上一步红；上传本身失败
+      # （网络、配额、token 失效）只影响徽章数据，不红 CI——所以
+      # fail_ci_if_error: false。token 走 CODECOV_TOKEN secret（仓库已配置），
+      # 用 v4+ 的新上传器并显式带 token，绕开 tokenless 上传的限流与拒绝。
+      - name: upload coverage to codecov
+        if: matrix.go == 'stable'
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
       # 种子语料随上面的 go test 常规跑过了，这一步是真正的挖掘：每个 fuzz
       # 靶按固定预算随机变异，崩溃即失败，并把 crash 语料写进
       # testdata/fuzz/<Target>/——提交回来就是一条永久回归用例。
