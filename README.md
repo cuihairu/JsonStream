@@ -8,13 +8,30 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/cuihairu/jsonstream.svg)](https://pkg.go.dev/github.com/cuihairu/jsonstream)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-一道面试题的衍生实现：基于 TCP 的自定义 JSON 二进制帧协议。纯标准库、零第三方依赖，Go ≥ 1.24。
+基于自定义二进制帧协议承载 JSON 业务数据——一条 TCP 连接多路复用请求/响应、流式、双工、单向与发布/订阅，内建心跳、断线恢复、可选压缩/加密与 credit 背压。纯标准库 Go 参考实现，零第三方依赖；协议规范语言无关，其他语言实现规划中。
 
 - **协议规范（语言无关，跨语言实现的单一事实源）**：[docs/protocol.md](docs/protocol.md)——只拿到这一份文档就应能写出可互通的其他语言实现；Go 实现已可用（[v0.1.0](https://github.com/cuihairu/jsonstream/releases/tag/v0.1.0)），Python/Rust 等其他语言实现规划中。
 - **题目要求**：[docs/interview-requirements.md](docs/interview-requirements.md)——题面原文分组与逐条实现现状（含分帧三条的如实标注）。
-- **在线文档**：<https://cuihairu.github.io/jsonstream/>（随 main 分支更新）。
-- **上手指南**：[docs/getting-started.md](docs/getting-started.md)——从 `go get` 到五种交互模式跑通一遍（对应站内 [/getting-started](https://cuihairu.github.io/jsonstream/getting-started)）；**API 参考**：[docs/api.md](docs/api.md)——全部公开 API 与默认值（对应站内 [/api](https://cuihairu.github.io/jsonstream/api)）。
-- 架构与取舍 [docs/DESIGN.md](docs/DESIGN.md)、知识点梳理 [docs/NOTES.md](docs/NOTES.md)、协议权衡笔记 [docs/design-notes.md](docs/design-notes.md)、与 WebSocket 的能力对照 [docs/websocket-comparison.md](docs/websocket-comparison.md)、TCP 流特性与市面协议横评 [docs/tcp-and-landscape.md](docs/tcp-and-landscape.md)。
+- **在线文档**：<https://cuihairu.github.io/jsonstream/>（随 main 分支更新），全部页面的入口导航：
+
+| 文档（仓库源文件） | 在线版 |
+| --- | --- |
+| [上手指南](docs/getting-started.md) | [getting-started](https://cuihairu.github.io/jsonstream/getting-started) |
+| [API 参考](docs/api.md) | [api](https://cuihairu.github.io/jsonstream/api) |
+| [协议规范](docs/protocol.md) | [protocol](https://cuihairu.github.io/jsonstream/protocol) |
+| [题目要求](docs/interview-requirements.md) | [interview-requirements](https://cuihairu.github.io/jsonstream/interview-requirements) |
+| [与 WebSocket 对照](docs/websocket-comparison.md) | [websocket-comparison](https://cuihairu.github.io/jsonstream/websocket-comparison) |
+| [TCP 流特性与协议横评](docs/tcp-and-landscape.md) | [tcp-and-landscape](https://cuihairu.github.io/jsonstream/tcp-and-landscape) |
+| [架构与取舍](docs/DESIGN.md) | [design](https://cuihairu.github.io/jsonstream/design) |
+| [设计笔记](docs/design-notes.md) | [design-notes](https://cuihairu.github.io/jsonstream/design-notes) |
+| [知识点梳理](docs/NOTES.md) | [notes](https://cuihairu.github.io/jsonstream/notes) |
+| [协议规范](docs/protocol.md) | [protocol](https://cuihairu.github.io/jsonstream/protocol) |
+| [面试题要求](docs/interview-requirements.md) | [interview-requirements](https://cuihairu.github.io/jsonstream/interview-requirements) |
+| [与 WebSocket 的能力对照](docs/websocket-comparison.md) | [websocket-comparison](https://cuihairu.github.io/jsonstream/websocket-comparison) |
+| [TCP 流特性与协议横评](docs/tcp-and-landscape.md) | [tcp-and-landscape](https://cuihairu.github.io/jsonstream/tcp-and-landscape) |
+| [架构与取舍](docs/DESIGN.md) | [DESIGN](https://cuihairu.github.io/jsonstream/DESIGN) |
+| [知识点梳理](docs/NOTES.md) | [NOTES](https://cuihairu.github.io/jsonstream/NOTES) |
+| [设计笔记](docs/design-notes.md) | [design-notes](https://cuihairu.github.io/jsonstream/design-notes) |
 
 ## 设计与知识点
 
