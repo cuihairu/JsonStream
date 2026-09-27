@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
 // ReadFrame 与 transformer.inbound 是不可信字节的信任边界：
@@ -212,5 +214,118 @@ func FuzzRawPeer(f *testing.F) {
 			t.Fatalf("request after malicious peer: %v", err)
 		}
 		_ = c.Close()
+	})
+}
+
+// FuzzDecodeMeta：元数据编解码层的两条性质——
+//  1. decodeMeta 对任意字节不 panic（截断 JSON、类型错值、非法 UTF-8、
+//     超长、空）。它吞掉 Unmarshal 错误是设计（protocol.md：坏 meta 退化
+//     为空路由，由分发层按 NOT_FOUND 处理），所以只钉 panic，不钉"出错
+//     时解出哪些部分"——那会把当时的实现细节错锁成契约。
+//  2. decodeMeta∘encodeMeta 对任意 (route, topic) 往返恒等。恒等域声明
+//     为合法 UTF-8：encoding/json 对非法字节按语言规范改写为 U+FFFD，
+//     那是本函数对边界之外的第一个行为，性质测试显式让出该域而不是悄悄
+//     放宽判据（design-notes §9 的同一条纪律）；让出域内的 panic 性质照测。
+func FuzzDecodeMeta(f *testing.F) {
+	f.Add([]byte(`{"route":"ping"}`), "ping", "")
+	f.Add([]byte(`{"topic":"ticks"}`), "", "ticks")
+	f.Add([]byte(`{"route":"r","topic":"t"}`), "r", "t")
+	f.Add([]byte(`{`), "", "")                                      // 截断 JSON
+	f.Add([]byte("not-json"), "x", "y")                             // 垃圾字节 + 合法字符串：恒等臂仍执行
+	f.Add([]byte(`{"route":123}`), "", "")                          // 类型错值：静默吞错是设计
+	f.Add([]byte(`{"topic":"`+"\xff\xfe"+`"}`), "\xff\xfe", "ok")   // 非法 UTF-8 双侧
+	f.Add([]byte(nil), "", "")                                      // 双空短路：encodeMeta 返回 nil，decodeMeta(nil) 归零
+	f.Add(bytes.Repeat([]byte("z"), 2*MaxMetadataSize), "long", "") // 超长非法 JSON + 合法往返
+	f.Fuzz(func(t *testing.T, raw []byte, route, topic string) {
+		_ = decodeMeta(raw)
+		got := decodeMeta(encodeMeta(route, topic))
+		if !utf8.ValidString(route) || !utf8.ValidString(topic) {
+			return
+		}
+		if got.Route != route || got.Topic != topic {
+			t.Fatalf("meta roundtrip: encodeMeta(%q, %q) decoded back = (%q, %q)", route, topic, got.Route, got.Topic)
+		}
+	})
+}
+
+// FuzzHandshakeJSON：握手 JSON 与协商层的三条性质——
+//  1. 任意字节 Unmarshal 进 ConnectJSON/connackJSON 不 panic（服务端解
+//     CONNECT 载荷、客户端解 CONNACK 载荷，两侧都是对端可控输入）。
+//  2. connectFrame/connackFrame 的 marshal∘unmarshal 对任意字段组合恒等
+//     （omitempty 的 credit/session_id/auth 零值省略后解回零值，语义等价；
+//     恒等域同样声明为合法 UTF-8，理由见 FuzzDecodeMeta）。
+//  3. effectiveConnack 对任意（服务端配置 × 客户端声明）不 panic，且协商
+//     必须是 wire 形态的纯函数：对同一 cfg，effectiveConnack(cj) 与
+//     effectiveConnack(cj 上线往返后的副本) 逐字段相等（编码层不得吞掉
+//     协商输入——negotiation 只消费 bool/int，非法 UTF-8 域也必须成立）；
+//     credit 用独立重算式核对 §6.1 规则（双方 >0 才启用、取较小；任一
+//     ≤0 关闭），不复读实现表达式。
+func FuzzHandshakeJSON(f *testing.F) {
+	f.Add([]byte(`{"version":1,"compress":true,"encrypt":false,"heartbeat_ms":10000,"credit":5,"session_id":"s","auth":"tok"}`),
+		1, 10000, 5, "s", "tok", true, false, 64, 15000, true, true)
+	f.Add([]byte(`{"version":"x"}`), // 类型错值：部分解码后被调用方吞错，只要求不 panic
+		0, 0, 0, "", "", false, false, 0, 0, false, false)
+	f.Add([]byte(`[`), // 截断 + 负 credit：背压"任一 ≤0 关闭"臂
+		0, 0, -7, "", "", false, false, 3, -5, false, false)
+	f.Add([]byte("null"), // 合法 JSON 的 null 文档 + 超大值（Duration 换算溢出不得 panic）
+		99, -1, 1<<40, "s", "a", true, true, 1<<40, 1<<40, true, true)
+	f.Add([]byte(nil), // 空字节：双零 credit 关闭臂
+		2, 15000, 0, "", "", false, false, 64, 1000, false, false)
+	f.Add(bytes.Repeat([]byte("y"), 4096), // 长垃圾 + 双方恰好相等的小 credit：min 边界
+		1, 1000, 2, "", "", false, false, 2, 1000, false, false)
+	f.Fuzz(func(t *testing.T, raw []byte, version, heartbeatMS, credit int, sessionID, auth string, compress, encrypt bool, srvCredit, srvHeartbeatMS int, srvCompress, srvEncrypt bool) {
+		// 性质 1：对端可控字节 → 握手结构体。
+		_ = jsonUnmarshal(raw, &ConnectJSON{})
+		_ = jsonUnmarshal(raw, &connackJSON{})
+
+		// 性质 2：CONNECT/CONNACK 帧的 marshal∘unmarshal 恒等。
+		cj := ConnectJSON{Version: version, Compress: compress, Encrypt: encrypt,
+			HeartbeatMS: heartbeatMS, Credit: credit, SessionID: sessionID, Auth: auth}
+		fr, err := connectFrame(&cj)
+		if err != nil {
+			t.Fatalf("connectFrame(%+v): %v", cj, err)
+		}
+		var back ConnectJSON
+		if err := jsonUnmarshal(fr.Payload, &back); err != nil {
+			t.Fatalf("CONNECT payload must re-decode: %v", err)
+		}
+		if utf8.ValidString(sessionID) && utf8.ValidString(auth) && back != cj {
+			t.Fatalf("CONNECT wire roundtrip: %+v -> %+v", cj, back)
+		}
+		aj := connackJSON{SessionID: sessionID, Resumed: compress, Compress: encrypt,
+			Encrypt: compress, HeartbeatMS: heartbeatMS, Credit: credit, RetentionMS: srvHeartbeatMS}
+		fr2, err := connackFrame(&aj)
+		if err != nil {
+			t.Fatalf("connackFrame(%+v): %v", aj, err)
+		}
+		var backAJ connackJSON
+		if err := jsonUnmarshal(fr2.Payload, &backAJ); err != nil {
+			t.Fatalf("CONNACK payload must re-decode: %v", err)
+		}
+		if utf8.ValidString(sessionID) && backAJ != aj {
+			t.Fatalf("CONNACK wire roundtrip: %+v -> %+v", aj, backAJ)
+		}
+
+		// 性质 3：协商纯函数性 + §6.1 规则独立重算。
+		cfg := Config{Credit: srvCredit, Compress: srvCompress, Encrypt: srvEncrypt,
+			Heartbeat: time.Duration(srvHeartbeatMS) * time.Millisecond,
+			Retention: time.Duration(heartbeatMS) * time.Millisecond}
+		got := effectiveConnack(cfg, &cj)
+		if viaWire := effectiveConnack(cfg, &back); got != viaWire {
+			t.Fatalf("negotiation not pure over wire form: %+v vs %+v", got, viaWire)
+		}
+		wantCredit := 0
+		if cfg.Credit > 0 && cj.Credit > 0 {
+			wantCredit = cfg.Credit
+			if cj.Credit < wantCredit {
+				wantCredit = cj.Credit
+			}
+		}
+		if got.Credit != wantCredit {
+			t.Fatalf("credit negotiation: cfg=%d cj=%d -> %d, want %d", cfg.Credit, cj.Credit, got.Credit, wantCredit)
+		}
+		if got.Compress != (cfg.Compress && cj.Compress) || got.Encrypt != (cfg.Encrypt && cj.Encrypt) {
+			t.Fatalf("feature flags must be AND of both sides: got %+v", got)
+		}
 	})
 }
