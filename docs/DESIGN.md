@@ -468,8 +468,8 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 | 包 | 语句覆盖率 | 说明 |
 | --- | --- | --- |
 | `jsonstream`（库） | **100.0%** | CI 有门禁（`.github/workflows/ci.yml`），跌破即失败 |
-| `examples/server` | 99.0% | 1 条未覆盖，见 §11.3 |
-| `examples/client` | 96.8% | 4 条未覆盖，见 §11.3 |
+| `examples/server` | 100.0% | 原 1 条窄竞态分支已补齐，构造见 §11.3 |
+| `examples/client` | 100.0% | 原 4 条窄竞态分支已补齐，构造见 §11.3 |
 
 库包覆盖率 100% 的含义要说准：**没有任何"测不到就是死码"的托词**——防御性分支靠五个包级接缝（jsonMarshal/aesNewCipher/gcmNew/randRead/resubAckTimeout）覆盖，其余靠并发时序构造覆盖（design-notes §9）。测试方法学（确定性并发、race detector 纪律）也在那一节。
 
@@ -497,18 +497,21 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 
 ### 11.3 覆盖率的口径与已知例外
 
-`examples/` 合计还有 5 条 `if err != nil { return err }` 未被覆盖，**全部属于同一类**：它们只在"连接或流恰好在这一瞬间死掉"时才失败，而示例是微秒级顺序执行的流水，测试无法把死亡稳定地插进那个窗口。逐条列在这里，免得读者以为是遗漏：
+`examples/` 两个包的语句现已全部覆盖（各自 **100.0%**）。这里曾长期记着"5 条窄竞态分支刻意不覆盖"；本轮逐条补齐——没有一条确认为不可达，但补法分三种确定性等级，逐条记录如下，构造方法本身就是这一节的内容：
 
-| 位置 | 分支 | 为什么覆盖不到 |
+| 位置 | 分支 | 覆盖构造 |
 | --- | --- | --- |
-| `examples/client` `Stream` | 连接在 `math.add` 响应之后、`Stream` 调用之前死掉 | 两者相隔微秒级；掐断 TCP 落在这个窗口里是概率事件 |
-| `examples/client` `Channel.Send` | 流在 `Channel` 返回后、`Send` 之前被终结 | 同上。服务端要等一个来回才可能终结流，那时 `Send` 早已发出 |
-| `examples/client` `SendOneWay` / `Publish` | 连接在调用前死掉 | API 已带 ctx（§8.4），失败有界、原则上可测；但示例里这两步紧贴着上一个刚成功的调用，死亡窗口仍是微秒级。库包同款分支有确定性契约测试（`TestOneWayPublishCtxContracts`：活连接 + 已取消 ctx、断连 + deadline、服务端扇出前取消三向），示例不重复构造这个竞态 |
-| `examples/server` `chat` 的 `ch.Send` | 流在 handler 的 `Receive` 与 `Send` 之间被终结 | 同一个微秒级窗口。示例没开 credit，所以 `Channel.Send` 的失败路径只剩"流已终结"和"传输已死"两条，都要求死亡恰好插在 `Receive` 与 `Send` 之间 |
+| `examples/client` `Stream` | 连接在 `math.add` 响应之后、`Stream` 调用之前死掉 | **确定性·泊日志点**：把 std log 的输出临时换成条件拦停器，示例主 goroutine 恰好泊在 `math.add(2, 40)` 这条日志上（恰在两条业务语句之间）；测试先掐线、等判死传播（50ms）再放行，`Stream` 必撞死连接。库自身日志走 `Config.Logger`（默认 discard），不会误触拦停器 |
+| `examples/client` `Channel.Send` | 流在 `Channel` 返回后、`Send` 之前被终结 | **高命中硬币·盲发连发**：chat 恒为 sid=7（客户端奇数号递增），脚本回完 range 两条数据后一次写入 2048 帧 ERROR(sid=7)——注册前到达的帧被 `lookupFlow` 静默忽略，连发尾段横贯注册时刻，readLoop 逐帧处理间隔（µs 级）小于注册→`isDone` 检查的窗口，于是几乎必有一帧落进窗口。单次回包的旧构造实测命中率约 0.2%，连发实测 ≥80%（-race 同样成立）；按 5% 保守下界，700 轮漏检概率 0.95^700 = e^-36 ≪ 2^-20（design-notes §9 纪律）。判据排除法唯一：全程不掐线，能产出裸 "connection closed" 的出口只有这一处 |
+| `examples/client` `SendOneWay` | 连接在 chat ack 之后、`SendOneWay` 之前死掉 | 同第一行的泊线技术，泊点取 `chat ack:` 日志行 |
+| `examples/client` `Publish` | 连接在 `SendOneWay` 已成功、`Publish` 之前死掉 | **确定性·钩子 + 正面证据锚定**：唯一实证为纯时序抓不住的分支——掐线锚在 chat ack 回包后的 δ 空转，扫 δ∈{0…480µs} 共 90 轮，无一轮出现"判死报错且 ONEWAY 在线上"（判死链路与主 goroutine 剩余链条赛跑：赢则连上一出口一起死，输则两出口全过）。改用示例侧 `beforePublish` 钩子掐线后，又暴露第二条隐蔽赛跑：写循环把迟到 ONEWAY 推上线与 kill 关 socket 并发，-race 实测约 1/8 轮帧被吞。终版把掐线锚定在对端**收到** ONEWAY 之后并向钩子确认，钩子等确认再加 20ms 传播余量——链条里没有未锚定的赛跑 |
+| `examples/server` `chat` 的 `ch.Send` | `Send` 阻塞在连接级信用闸门、被 CANCEL 解锁 | **确定性·裸连接抽干窗口**：raw TCP 声明 credit=2 且永不回授 CREDIT，生效窗口 min(64, 2)=2；range 两帧上线（线上观测确认——credit 在 take 时扣）后窗口归零、第三条 Emit 永挂；chat 消息使 `ch.Send` 的 take 排进空窗口，CANCEL 关闭该流 ctx → take 返回 CANCELLED → `return err` → 框架的 ERROR(sid=3, code=5) 被裸连接读回。全链正面证据，示例代码零改动 |
 
-刻意不去覆盖它们，理由是：为了覆盖率给示例代码加测试钩子、加 sleep，或把双工 handler 改写成一次性收发的形态，都是在破坏示例（它同时是文档、API 范例和面试展示物）的价值。库包里所有等价分支都有确定性测试覆盖——那才是覆盖率该保证的地方；而示例的价值在于"读起来是对的"，不在于"每行都执行过"。
+三条教训值得单独记：**"覆盖不到"要先实证再采信**——旧版把 Publish 分支归为"窗口微秒级、概率事件"却没量化过；90 轮扫描给出的不是"难"而是"恒不可观测"，正是这个实证把一次小的形状变更（带注释、演示路径恒 nil 的检查点钩子）从"破坏示例"变成"值得付的代价"。**硬币可以做得很厚**——窄窗竞态的漏检来自"到达时刻 vs 窗口"的固定偏置，单次探测赢不了就把到达序列铺满窗口两侧（盲发连发 + `lookupFlow` 对未注册流的静默忽略 = 免费的轮次），偏置消失而判据不变。**掐线的锚点要选在已上线的帧上**——凡"测试侧观察→行动"的时序，观察对象必须是已经发生的正面证据（收到的帧），不是"应该已经发生"的本地时刻。
 
-已为可覆盖的部分付出的真实代价（不是白得的）：示例服务端为了让 `serve` 可测而抽出 `options`/`parseOptions`/`serve(ctx)`，示例客户端为了让超时可注入而抽出 `runOptions.callTTL`；示例双工 handler 补了 `io.EOF` 判断，避免对端正常半关闭时被回一个 `ERROR(INTERNAL)` 帧——这一条是**修 bug，不是补覆盖率**。
+原有判断保留但范围收窄：为覆盖率给示例加 sleep、加测试专用分支、把双工 handler 改写成一次性收发的形态，依然不做。`beforePublish` 是唯一例外，按"读起来像正常工程代码"的标准写（配置结构体上的函数字段、注释说明存在理由），与 `runOptions.callTTL` 同源。库包等价分支另有确定性契约测试（`TestOneWayPublishCtxContracts` 等），示例测试不复重库语义，只证明示例脚本自身会走到这些 return。
+
+已为可覆盖的部分付出的真实代价（不是白得的）：示例服务端为了让 `serve` 可测而抽出 `options`/`parseOptions`/`serve(ctx)`，示例客户端为了让超时可注入而抽出 `runOptions.callTTL`、为了让 Publish 出口可确定性命中而加了 `beforePublish` 检查点；示例双工 handler 补了 `io.EOF` 判断，避免对端正常半关闭时被回一个 `ERROR(INTERNAL)` 帧——这一条是**修 bug，不是补覆盖率**。
 
 已知边界与缺点清单（诚实版）：design-notes.md §7；未做的优化（帧缓冲池化、小帧写合并、字段对齐重排）：design-notes.md §8。测试里抓到的 9 个真缺陷（每条都是一条设计教训的实证）：README「测试里抓到的真 bug」。
 

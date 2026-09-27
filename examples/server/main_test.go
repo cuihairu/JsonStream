@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"flag"
 	"net"
 	"os"
@@ -339,6 +342,131 @@ func TestChatHandlerErrors(t *testing.T) {
 	_ = cancelled.Cancel()
 	// 与上面同理：服务端的 Receive 返回发生在它自己的 goroutine 里。
 	time.Sleep(200 * time.Millisecond)
+}
+
+// ---- chat 的 ch.Send 错误返回（main.go 第 150-151 行） ----
+
+// wireFrame 手工编码一帧线上字节（可带元数据）。布局与库的 appendTo 一致：
+// 14B 定长头（长度字段只含 payload，不含 meta），有 meta 时再跟
+// 2B metaLen + meta。（与 examples/client 测试里的同名助手同源。）
+func wireFrame(typ jsonstream.FrameType, flags uint8, sid uint32, meta, payload string) []byte {
+	var mb []byte
+	if meta != "" {
+		mb = []byte(meta)
+		flags |= uint8(jsonstream.FlagHasMeta)
+	}
+	pb := []byte(payload)
+	n := 14 + len(pb)
+	if meta != "" {
+		n += 2 + len(mb)
+	}
+	b := make([]byte, n)
+	b[0], b[1] = 0x4A, 0x53
+	b[2] = 1 // ProtocolVersion
+	b[3] = flags
+	b[4] = byte(typ)
+	binary.BigEndian.PutUint32(b[6:10], sid)
+	binary.BigEndian.PutUint32(b[10:14], uint32(len(pb)))
+	if meta != "" {
+		binary.BigEndian.PutUint16(b[14:16], uint16(len(mb)))
+		copy(b[16:], mb)
+		copy(b[16+len(mb):], pb)
+	} else {
+		copy(b[14:], pb)
+	}
+	return b
+}
+
+// readFrameUntil 从裸连接读帧直到 pred 命中（跳过途中任何帧），返回命中的
+// 帧；超时/坏帧即失败。用它把测试的每一步锚在「对端确实走到了这里」的
+// 正面证据上，而不是靠猜的固定 sleep。
+func readFrameUntil(t *testing.T, br *bufio.Reader, c net.Conn, pred func(*jsonstream.Frame) bool, what string) *jsonstream.Frame {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_ = c.SetReadDeadline(deadline)
+		f, err := jsonstream.ReadFrame(br)
+		if err != nil {
+			t.Fatalf("waiting for %s: %v", what, err)
+		}
+		if pred(f) {
+			return f
+		}
+	}
+}
+
+// chat handler 的 ch.Send 几乎不会失败——除非连接级信用被抽干且永不回授。
+// 这里用一条裸 TCP 连接扮演「永不发 CREDIT 帧的对端」，把「Send 阻塞在
+// take 上」做成可观测的确定状态（credit 在 take 时扣、上线前扣完，所以
+// 每收到一帧 range 数据就知道窗口又少了一格）：
+//
+//  1. CONNECT 带 credit=2 → 生效窗口 min(默认254, 2)=2；
+//  2. 发 range(n=5)，读到 n=0、n=1 两帧 ⇒ 窗口确证归零，第三条 Emit 永挂；
+//  3. 开 chat、发一条消息 ⇒ ch.Send 的 take 排进空窗口，阻塞在这里
+//     （等 50ms 让「已入队 take」先于第 4 步成立，余量三个数量级）；
+//  4. 发 CANCEL(chat) ⇒ take 的 ctx 就是该流的 ctx，doneCh 关闭，take 返回
+//     CANCELLED ⇒ handler 走到 `return err` ⇒ 框架把 ERROR(sid) 写上线。
+//
+// 测试最终从裸连接读到这条 ERROR(sid=3, code=5)：从 handler 的 return 到
+// 帧达对端全链路走通，是该出口存在的完整证据。为什么不靠时序竞态：真实
+// 客户端回授信用由框架自动完成，Send 卡住的唯一现实路径就是对端停摆——
+// 只有裸连能把「窗口归零且无人回授」钉成恒态。
+func TestChatSendBlockedByCreditDiesOnCancel(t *testing.T) {
+	// 服务端必须显式启用背压（示例默认值 0 = 关闭），CONNECT 声明 2 →
+	// 生效窗口 min(64, 2) = 2。
+	rs := startServe(t, func(o *options) { o.cfg.Credit = 64 })
+	c, err := net.Dial("tcp", rs.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Time{})
+	br := bufio.NewReader(c)
+
+	if _, err := c.Write(wireFrame(jsonstream.TypeConnect, 0, 0, "", `{"version":1,"credit":2,"heartbeat_ms":10000}`)); err != nil {
+		t.Fatal(err)
+	}
+	ack := readFrameUntil(t, br, c, func(f *jsonstream.Frame) bool { return f.Type == jsonstream.TypeConnAck }, "CONNACK")
+	var connack struct {
+		Credit int `json:"credit"`
+	}
+	if err := json.Unmarshal(ack.Payload, &connack); err != nil || connack.Credit != 2 {
+		t.Fatalf("CONNACK credit = %s, want 2 (err %v)", ack.Payload, err)
+	}
+
+	// 步骤 2：range 抽干窗口。REQUEST(sid=1) 用奇数号，与裸连的 chat(sid=3)
+	// 同属客户端侧号段（protocol.md §7.3），服务端只按表分发不校验发起号段。
+	if _, err := c.Write(wireFrame(jsonstream.TypeRequest, uint8(jsonstream.FlagStream), 1, `{"route":"range"}`, `{"n":5}`)); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`{"n":0}`, `{"n":1}`} {
+		f := readFrameUntil(t, br, c, func(f *jsonstream.Frame) bool {
+			return f.Type == jsonstream.TypeResponse && f.StreamID == 1
+		}, "range item "+want)
+		if string(f.Payload) != want {
+			t.Fatalf("range frame = %s, want %s", f.Payload, want)
+		}
+	}
+
+	// 步骤 3：chat 建立 + 一条上行消息 ⇒ 服务端 handler 的 ch.Send 阻塞。
+	if _, err := c.Write(wireFrame(jsonstream.TypeRequest, uint8(jsonstream.FlagStream|jsonstream.FlagChannel), 3, `{"route":"chat"}`, `null`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Write(wireFrame(jsonstream.TypeResponse, uint8(jsonstream.FlagStream|jsonstream.FlagChannel), 3, "", `{"text":"hi"}`)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// 步骤 4：CANCEL 解锁 take → handler return err → ERROR 上线。
+	if _, err := c.Write(wireFrame(jsonstream.TypeCancel, 0, 3, "", "")); err != nil {
+		t.Fatal(err)
+	}
+	f := readFrameUntil(t, br, c, func(f *jsonstream.Frame) bool {
+		return f.Type == jsonstream.TypeError && f.StreamID == 3
+	}, "ERROR(sid=3)")
+	if !strings.Contains(string(f.Payload), `"code":5`) {
+		t.Fatalf("ERROR payload = %s, want cancelled code 5", f.Payload)
+	}
 }
 
 func TestOneWayAndPublish(t *testing.T) {

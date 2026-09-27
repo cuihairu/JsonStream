@@ -44,6 +44,12 @@ type runOptions struct {
 	callTTL time.Duration
 	// demo 是演示收尾前的观察时长。
 	demo time.Duration
+	// beforePublish 是 Publish 调用前的检查钩子，演示恒为 nil。它存在的
+	// 唯一理由是 Publish 的错误出口：它与前一句 SendOneWay 的入队仅相隔
+	// 微秒级，「SendOneWay 已成功、Publish 撞上死连接」这个时刻用纯时序
+	// 竞态抓不住（示例测试里有实证说明），只能由测试在两点之间注入掐线，
+	// 单独验证该出口。
+	beforePublish func()
 }
 
 func defaultRunOptions(demo time.Duration) runOptions {
@@ -154,6 +160,9 @@ func runWith(o runOptions, addr string) error {
 	cancel()
 	if err != nil {
 		return err
+	}
+	if o.beforePublish != nil {
+		o.beforePublish()
 	}
 	pubCtx, cancel := context.WithTimeout(ctx, o.callTTL)
 	err = c.Publish(pubCtx, "metrics", map[string]int{"cpu": 42})
