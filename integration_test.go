@@ -431,7 +431,7 @@ func TestSubscriptionSurvivesResume(t *testing.T) {
 	sid := c.SessionID()
 
 	// 订阅生效：实时广播可达。
-	if err := srv.Publish("news", item{N: 1}); err != nil {
+	if err := srv.Publish(context.Background(), "news", item{N: 1}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -450,7 +450,7 @@ func TestSubscriptionSurvivesResume(t *testing.T) {
 	tr.kill(errors.New("simulated network failure"))
 	time.Sleep(100 * time.Millisecond) // 等服务端感知断连、会话转入保留
 	for n := 2; n <= 4; n++ {
-		if err := srv.Publish("news", item{N: n}); err != nil {
+		if err := srv.Publish(context.Background(), "news", item{N: n}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -478,7 +478,7 @@ func TestSubscriptionSurvivesResume(t *testing.T) {
 	}
 
 	// 之后的实时广播继续投递：服务端保留的订阅关系直接可用。
-	if err := srv.Publish("news", item{N: 5}); err != nil {
+	if err := srv.Publish(context.Background(), "news", item{N: 5}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -525,7 +525,7 @@ func TestSubscriptionSurvivesResume(t *testing.T) {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	if err := srv.Publish("news", item{N: 6}); err != nil {
+	if err := srv.Publish(context.Background(), "news", item{N: 6}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -764,7 +764,7 @@ func TestResumeExpiredFailsPendingAndResubscribes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := srv.Publish("news", item{N: 1}); err != nil {
+	if err := srv.Publish(context.Background(), "news", item{N: 1}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -834,7 +834,7 @@ func TestResumeExpiredFailsPendingAndResubscribes(t *testing.T) {
 	}
 
 	// 订阅应已自动重订：断线后的广播仍能送达。
-	if err := srv.Publish("news", item{N: 2}); err != nil {
+	if err := srv.Publish(context.Background(), "news", item{N: 2}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -1037,7 +1037,7 @@ func TestModeOneWay(t *testing.T) {
 		})
 	})
 	c := dialTest(t, addr, shortConfig())
-	if err := c.SendOneWay("notify", item{N: 7}); err != nil {
+	if err := c.SendOneWay(context.Background(), "notify", item{N: 7}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -1049,8 +1049,68 @@ func TestModeOneWay(t *testing.T) {
 		t.Fatal("oneway message not delivered")
 	}
 	// 路由不存在也必须静默（协议规定 ONEWAY 永不回帧）。
-	if err := c.SendOneWay("missing", item{N: 1}); err != nil {
+	if err := c.SendOneWay(context.Background(), "missing", item{N: 1}); err != nil {
 		t.Fatalf("oneway to missing route must not error: %v", err)
+	}
+}
+
+// SendOneWay/Publish 族补 ctx 后的契约（§8.4 的 API 演进落地）：
+//   - 已取消的 ctx 在活连接/活会话上必须确定性拒绝，且不发帧；
+//   - Server.Publish 在扇出前发现取消必须报错而不是静默广播；
+//   - 断连时 ctx 上限约束"等重连"——服务端消失不再无限等（这正是补
+//     ctx 要修的那个无界等待）。
+func TestOneWayPublishCtxContracts(t *testing.T) {
+	var srv *Server
+	_, addr := startTestServer(t, shortConfig(), func(s *Server) { srv = s })
+	c := dialTest(t, addr, shortConfig())
+
+	got := make(chan int, 4)
+	if _, err := c.Subscribe(context.Background(), "news", func(msg *Message) error {
+		var it item
+		if err := msg.Decode(&it); err != nil {
+			return err
+		}
+		got <- it.N
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sid := c.SessionID()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := c.SendOneWay(ctx, "notify", item{N: 1}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("client SendOneWay cancelled ctx = %v, want context.Canceled", err)
+	}
+	if err := c.Publish(ctx, "news", item{N: 1}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("client Publish cancelled ctx = %v, want context.Canceled", err)
+	}
+	if err := srv.SendOneWay(ctx, sid, "client.log", item{N: 1}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("server SendOneWay cancelled ctx = %v, want context.Canceled", err)
+	}
+	if err := srv.Publish(ctx, "news", item{N: 1}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("server Publish cancelled ctx = %v, want context.Canceled", err)
+	}
+	select {
+	case n := <-got:
+		t.Fatalf("cancelled Publish delivered frame %d", n)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// 断连 + 服务端监听已关（重连必然被拒）：ctx 到期即失败。
+	srv.Close()
+	c.mu.Lock()
+	tr := c.ep.tr
+	c.mu.Unlock()
+	select {
+	case <-tr.dead:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client connection did not die after server close")
+	}
+	deadlineCtx, dcancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer dcancel()
+	if err := c.SendOneWay(deadlineCtx, "notify", item{N: 2}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("SendOneWay while disconnected = %v, want DeadlineExceeded", err)
 	}
 }
 
@@ -1073,7 +1133,7 @@ func TestModePubSub(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 1; i <= 3; i++ {
-		if err := srv.Publish("ticks", item{N: i}); err != nil {
+		if err := srv.Publish(context.Background(), "ticks", item{N: i}); err != nil {
 			t.Fatal(err)
 		}
 		select {
@@ -1090,7 +1150,7 @@ func TestModePubSub(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(50 * time.Millisecond)
-	if err := srv.Publish("ticks", item{N: 99}); err != nil {
+	if err := srv.Publish(context.Background(), "ticks", item{N: 99}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -1106,7 +1166,7 @@ func TestModePubSub(t *testing.T) {
 			if err := msg.Decode(&it); err != nil {
 				return err
 			}
-			return s.Publish("mirror", item{N: it.N * 10})
+			return s.Publish(context.Background(), "mirror", item{N: it.N * 10})
 		})
 	})
 	c2 := dialTest(t, addr2, shortConfig())
@@ -1121,7 +1181,7 @@ func TestModePubSub(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := c2.Publish("events", item{N: 5}); err != nil {
+	if err := c2.Publish(context.Background(), "events", item{N: 5}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -1514,7 +1574,7 @@ func TestServerInitiatedModes(t *testing.T) {
 	}
 
 	// 单向
-	if err := srv.SendOneWay(sid, "client.log", item{N: 9}); err != nil {
+	if err := srv.SendOneWay(context.Background(), sid, "client.log", item{N: 9}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -1608,7 +1668,7 @@ func TestServerInitiatedEncrypted(t *testing.T) {
 	}
 
 	// 服务端 → 客户端 单向
-	if err := srv.SendOneWay(sid, "client.log", blobItem{N: 9, Blob: blob}); err != nil {
+	if err := srv.SendOneWay(context.Background(), sid, "client.log", blobItem{N: 9, Blob: blob}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -1915,7 +1975,7 @@ func TestResumeOverflowedSessionStartsFresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sub.Close()
-	if err := srv.Publish("news", item{N: 1}); err != nil {
+	if err := srv.Publish(context.Background(), "news", item{N: 1}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -1955,7 +2015,7 @@ func TestResumeOverflowedSessionStartsFresh(t *testing.T) {
 
 	// 断开期间灌入超限广播：溢出 → 清空队列并标记不可恢复
 	for i := 2; i < 100; i++ {
-		if err := srv.Publish("news", item{N: i}); err != nil {
+		if err := srv.Publish(context.Background(), "news", item{N: i}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1978,7 +2038,7 @@ func TestResumeOverflowedSessionStartsFresh(t *testing.T) {
 	if c.SessionID() == oldID {
 		t.Fatal("client should have a fresh session after overflow")
 	}
-	if err := srv.Publish("news", item{N: 999}); err != nil {
+	if err := srv.Publish(context.Background(), "news", item{N: 999}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -2510,7 +2570,7 @@ func TestZeroValueConfigDial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Publish("ztopic", map[string]int{"v": 1}); err != nil {
+	if err := c.Publish(context.Background(), "ztopic", map[string]int{"v": 1}); err != nil {
 		t.Fatal(err)
 	}
 	if err := sub.Close(); err != nil {

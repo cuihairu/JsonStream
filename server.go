@@ -66,8 +66,10 @@ func (s *Server) HandlePublish(topic string, h func(*Message) error) { s.table.H
 // OnAuth 注册握手鉴权钩子；返回非 nil error 时以 AUTH_DENIED 拒绝连接。
 func (s *Server) OnAuth(h func(*ConnectJSON) error) { s.table.OnAuth(h) }
 
-// Publish 向所有已订阅该主题的连接广播一帧 PUBLISH。
-func (s *Server) Publish(topic string, payload any) error {
+// Publish 向所有已订阅该主题的连接广播一帧 PUBLISH。ctx 约束每目标
+// 投递的入队等待；取消发生在扇出中途时已投递的目标不撤回，返回 ctx 错误
+// 让调用方知道这次广播是不完整的。
+func (s *Server) Publish(ctx context.Context, topic string, payload any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -97,7 +99,13 @@ func (s *Server) Publish(topic string, payload any) error {
 		ss.mu.Unlock()
 	}
 	for _, tg := range targets {
-		_ = tg.ss.sendDown(&Frame{
+		// 逐目标预检而不是只在入口查一次：把「取消后还继续投递」的窗口
+		// 压到单个目标的粒度。sendDown 对已取消 ctx 的行为是确定性拒绝
+		// （sendCtx 预检），这里的预检只是让循环不必再进一次锁。
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		_ = tg.ss.sendDown(ctx, &Frame{
 			Header:   Header{Version: ProtocolVersion, Type: TypePublish, StreamID: tg.id},
 			Metadata: encodeMeta("", topic),
 			Payload:  data,
@@ -169,13 +177,14 @@ func (s *Server) Channel(ctx context.Context, sessionID, route string, payload a
 	return ep.doChannel(ctx, route, payload)
 }
 
-// SendOneWay 向指定会话单向发送。
-func (s *Server) SendOneWay(sessionID, route string, payload any) error {
+// SendOneWay 向指定会话单向发送。ctx 约束发送入队等待（sessionEp 本身
+// 非阻塞：只查锁与死连接标志）。
+func (s *Server) SendOneWay(ctx context.Context, sessionID, route string, payload any) error {
 	ep, err := s.sessionEp(sessionID)
 	if err != nil {
 		return err
 	}
-	return ep.doOneWay(route, payload)
+	return ep.doOneWay(ctx, route, payload)
 }
 
 // Serve 开始接受连接，阻塞直到 Close。
@@ -284,7 +293,9 @@ func (s *Server) handleConn(nc net.Conn) {
 	ep = sc.ep
 	sc.ep.onSubscribe = sc.onSubscribe
 	sc.ep.onUnsubscribe = sc.onUnsubscribe
-	sc.ep.downSink = sess.sendDown
+	// handler 的投递是内部机械路径，没有调用方超时可挂——显式 Background
+	// 而不是把 sendDown 直接挂上去，让"哪条路径带调用方 ctx"只在签名上成立。
+	sc.ep.downSink = func(f *Frame) error { return sess.sendDown(context.Background(), f) }
 
 	_ = nc.SetDeadline(time.Time{})
 	// 先注册、后写 CONNACK：客户端收到 CONNACK 即视为已建立（Dial 返回、
@@ -401,11 +412,14 @@ type serverSession struct {
 
 // sendDown 是下行帧落点：连接活着直达 transport；断开期间按流保留进
 // 恢复队列（RESPONSE/PUBLISH/SUBACK/COMPLETE/ERROR；CREDIT 不保留）。
-func (ss *serverSession) sendDown(f *Frame) error {
+// ctx 只约束活连接上的入队等待；保留队列路径是非阻塞的内存追加，ctx
+// 与之无关。handler 内部经 downSink 的投递没有调用方超时，绑定处传
+// context.Background()。
+func (ss *serverSession) sendDown(ctx context.Context, f *Frame) error {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	if ss.conn != nil {
-		return ss.conn.ep.tr.send(f)
+		return ss.conn.ep.tr.sendCtx(ctx, f)
 	}
 	if f.Type == TypeCredit || ss.overflowed {
 		return nil

@@ -200,14 +200,14 @@ func TestRunFullDemo(t *testing.T) {
 	go func() {
 		waitSessions(t, d.Server, 1)
 		time.Sleep(60 * time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
 		for _, sid := range d.Sessions() {
-			_ = d.SendOneWay(sid, "client.notice", map[string]string{"text": "hi"})
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = d.SendOneWay(ctx, sid, "client.notice", map[string]string{"text": "hi"})
 			_, _ = d.Request(ctx, sid, "client.time", nil)
-			cancel()
 		}
-		_ = d.Publish("metrics", map[string]int{"cpu": 1})
-		_ = d.Publish("ticks", map[string]int{"tick": 1})
+		_ = d.Publish(ctx, "metrics", map[string]int{"cpu": 1})
+		_ = d.Publish(ctx, "ticks", map[string]int{"tick": 1})
 	}()
 
 	if err := runWith(defaultRunOptions(400*time.Millisecond), addr); err != nil {

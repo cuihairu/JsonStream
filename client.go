@@ -176,22 +176,24 @@ func (c *Client) Channel(ctx context.Context, route string, payload any) (*Chann
 	return ep.doChannel(ctx, route, payload)
 }
 
-// SendOneWay 单向发送，协议保证不产生任何响应帧。
-func (c *Client) SendOneWay(route string, payload any) error {
-	ep, err := c.waitEp(context.Background())
+// SendOneWay 单向发送，协议保证不产生任何响应帧。ctx 同时约束「等可用
+// 连接」（断连期间等重连）与「等发送入队」（对端停滞排满发送队列）。
+func (c *Client) SendOneWay(ctx context.Context, route string, payload any) error {
+	ep, err := c.waitEp(ctx)
 	if err != nil {
 		return err
 	}
-	return ep.doOneWay(route, payload)
+	return ep.doOneWay(ctx, route, payload)
 }
 
 // Publish 把消息发布到服务端主题（由 Server.HandlePublish 处理）。
-func (c *Client) Publish(topic string, payload any) error {
-	ep, err := c.waitEp(context.Background())
+// ctx 语义与 SendOneWay 相同：约束等连接与等入队两段。
+func (c *Client) Publish(ctx context.Context, topic string, payload any) error {
+	ep, err := c.waitEp(ctx)
 	if err != nil {
 		return err
 	}
-	return ep.doPublish(topic, payload)
+	return ep.doPublish(ctx, topic, payload)
 }
 
 // Subscribe 订阅服务端广播的主题，投递经回调交付。

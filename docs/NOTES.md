@@ -120,7 +120,7 @@ tr := newTransport(nc, br, …)   // ← 传的是 br 本身
 
 `transport` 的字段类型因此是 `io.Reader` 而不是 `*bufio.Reader`（transport.go:17 注释写明"与握手阶段共享的 bufio，避免缓冲数据丢失"）。如果这里新建一个 `bufio.NewReader(conn)`，握手阶段缓冲里的字节就被永久跳过。
 
-注意 `readLoop` 里**又包了一层** `bufio.NewReaderSize(t.reader, 16<<10)`（transport.go:156）却依然安全：它包的是 `t.reader`（那个共享的 `br`）而不是 `conn`。多一层缓冲只多一次内存拷贝，不跨阶段抢字节。这类"看起来冗余"的代码必须在注释里写清理由，否则下一个人会顺手优化掉它。
+注意 `readLoop` 里**又包了一层** `bufio.NewReaderSize(t.reader, 16<<10)`（transport.go:175）却依然安全：它包的是 `t.reader`（那个共享的 `br`）而不是 `conn`。多一层缓冲只多一次内存拷贝，不跨阶段抢字节。这类"看起来冗余"的代码必须在注释里写清理由，否则下一个人会顺手优化掉它。
 
 **面试怎么讲**：能画出三种形态的内存/时序差异；能说清"帧边界已给定 ⇒ 帧内 token 流是负收益"这条推理链（这是本题最容易被追问、也最能体现判断力的一问）；能讲"读过头"以及为什么本项目用"共享 reader"而不是 `Buffered()` 解决它。
 
@@ -132,7 +132,7 @@ tr := newTransport(nc, br, …)   // ← 传的是 br 本身
 - 分隔符：文本协议常用（Redis RESP 的 `\r\n`、HTTP 头的 `\r\n\r\n`）。致命问题是**分隔符在载荷中出现时需要转义**，JSON 里任意转义都可能出现在字符串值中，转义方案会把解码变成变长扫描。
 - 长度前缀：头里写明"接下来多长是载荷"，解码端"读头 → 按长度读体"，无条件操作。HTTP/2、WebSocket（扩展长度）、MQTT 剩余长度、RSocket 都是这类。
 
-**本实现**：14B 定长头 + 32 位大端长度前缀（frame.go:23）。`ReadFrame`（frame.go:168）是教科书式两段读：`io.ReadFull(head[:14])` 再 `io.ReadFull(payload)`——ReadFull 的语义就是"读满或出错"，半包由它内部循环解决，粘包由 bufio 缓冲解决。上层 `transport.readLoop`（transport.go:156）再包一层 16KiB bufio，从内核批量搬字节减少 syscall。
+**本实现**：14B 定长头 + 32 位大端长度前缀（frame.go:23）。`ReadFrame`（frame.go:168）是教科书式两段读：`io.ReadFull(head[:14])` 再 `io.ReadFull(payload)`——ReadFull 的语义就是"读满或出错"，半包由它内部循环解决，粘包由 bufio 缓冲解决。上层 `transport.readLoop`（transport.go:175）再包一层 16KiB bufio，从内核批量搬字节减少 syscall。
 
 **面试要点**：能说清"粘包不是 TCP 的 bug，是字节流语义的本意"；能推导为什么 JSON 不适合分隔符成帧；知道 `io.ReadFull` vs `io.ReadFull` 循环 vs `bufio` 的分工（ReadFull 解决半包，bufio 解决 syscall 次数，二者不可互相替代）。
 
@@ -140,7 +140,7 @@ tr := newTransport(nc, br, …)   // ← 传的是 br 本身
 
 **原理**：网络字节序规定为大端（高位字节在低地址），历史原因是位拆解直观。Go 的 `encoding/binary` 提供 `BigEndian.Uint32`/`AppendUint32`；`AppendUint32` 是零分配写法（append 风格），比 `binary.Write(w, ...)` 走 io.Writer 接口快一个量级（接口调度 + 装箱）。
 
-**本实现**：frame.go:144-153 全部用 `binary.BigEndian.AppendXxx`；`Frame.appendTo(dst)` 是 append 风格 API——调用方传入可复用缓冲，编码器只追加。写循环里 `buf, err = t.encodeFrame(buf[:0], f)`（transport.go:118）就是"复用上一帧的缓冲"——`buf[:0]` 重置长度保留容量。
+**本实现**：frame.go:144-153 全部用 `binary.BigEndian.AppendXxx`；`Frame.appendTo(dst)` 是 append 风格 API——调用方传入可复用缓冲，编码器只追加。写循环里 `buf, err = t.encodeFrame(buf[:0], f)`（transport.go:138）就是"复用上一帧的缓冲"——`buf[:0]` 重置长度保留容量。
 
 **面试要点**：为什么大端（历史 + 可读性 + 网络惯例）；`binary.Write` 与 `AppendUint32` 的性能差距来源（接口调用、反射路径）；append 风格 API 在热路径的价值。
 
@@ -190,7 +190,7 @@ tr := newTransport(nc, br, …)   // ← 传的是 br 本身
 
 **本实现的三个"被 bug 教育出来"的 channel 纪律**：
 
-1. **死连接上的 select 双就绪**（transport.go:78）：连接死后 sendCh 常有空位，`send` 的 select 可能随机选中入队分支——帧入队但永不写出，静默丢失。修法：进 select 前先对 dead 做非阻塞预检，给"死"优先级。教训：**select 的随机性在错误路径上不是公平，是不确定**。
+1. **死连接上的 select 双就绪**（transport.go:93）：连接死后 sendCh 常有空位，`send` 的 select 可能随机选中入队分支——帧入队但永不写出，静默丢失。修法：进 select 前先对 dead 做非阻塞预检，给"死"优先级。教训：**select 的随机性在错误路径上不是公平，是不确定**。
 2. **终结排空**（flow.go:181）：doneCh 关闭时 frames 里可能还有余帧，Next 的 select 双就绪随机选择，直接返回 false 会随机丢最后一帧。修法：doneCh 分支先排空 frames。教训：**异步终结与缓冲交付的组合必须在消费端显式排空**。
 3. **cap-1 信号量**（credit.go:14）：notify 容量为 1，多次 add 只保留一次唤醒信号——因为它传的是"有新令牌"这个事件而非数量，数量在 mu 保护的 n 里。这是把"事件"与"计数"分离的标准写法，避免每令牌一个 channel 元素。
 
@@ -217,7 +217,7 @@ tr := newTransport(nc, br, …)   // ← 传的是 br 本身
 
 **本实现**（transport.go）：写循环 ticker 每 `Heartbeat` 发 PING（无数据帧竞争时）；读循环**每收到任何帧**都重置 `SetReadDeadline(now + 1.5×Heartbeat)`——不单等 PONG，因为任何帧都是活性证据，这把"心跳"与"流量"统一成一个判据。1.5× 的推导：容忍一次 PING 丢失/一次调度抖动，同时 2× 以上判死太慢。双向独立发，间隔经 CONNACK 协商一致（服务端权威）。
 
-写超时硬编码 10s（transport.go:120）：写阻塞的对端通常已死（TCP 缓冲满 + 无 ACK），10s 足够穿过正常 RTT 而不至于让写 goroutine 挂太久。备选：把写超时也做成配置——v1 不做，因为它不是语义参数而是防御参数，暴露出去只会引诱用户调错。
+写超时硬编码 10s（transport.go:140）：写阻塞的对端通常已死（TCP 缓冲满 + 无 ACK），10s 足够穿过正常 RTT 而不至于让写 goroutine 挂太久。备选：把写超时也做成配置——v1 不做，因为它不是语义参数而是防御参数，暴露出去只会引诱用户调错。
 
 **面试要点**：keepalive vs 应用层心跳的层次差异；为什么"任何帧都算活性"；deadline 是怎么生效的（runtime 在 epoll wait 前计算最近 deadline，超时的 netpoll 触发 read/write 返回超时错误——不是定时器线程打断读）。
 
@@ -282,13 +282,13 @@ tr := newTransport(nc, br, …)   // ← 传的是 br 本身
 
 | 陷阱 | 现象 | 本仓库 |
 | --- | --- | --- |
-| **`select` 多就绪时随机选** | 公平性设计，但在错误路径上 = 不确定性 | `transport.send` 先对 `dead` 做非阻塞预检（transport.go:78）；消费端在 `doneCh` 分支先排空 `frames`（flow.go:181）。两条都是 CI race/实测逼出来的（NOTES §8） |
+| **`select` 多就绪时随机选** | 公平性设计，但在错误路径上 = 不确定性 | `transport.send` 先对 `dead` 做非阻塞预检（transport.go:93）；消费端在 `doneCh` 分支先排空 `frames`（flow.go:181）。两条都是 CI race/实测逼出来的（NOTES §8） |
 | **typed-nil 装进 error 接口** | `var e *Error; return e` 的 `err != nil` 为真，调用方一解引用就 panic | `asStreamError` 用类型断言，nil `*Error` 会让错误帧载荷变成 `null`，对端归一为 INTERNAL——**降级而非崩溃**（DESIGN.md §7 末条记录了这个已知盲区） |
 | **整数转换静默截断** | `uint16(65536)` = 0，凭空造出一个"长度为 0"的错帧 | `MaxMetadataSize = math.MaxUint16`（不是 64KiB），编码侧用 `min(len, Max)` 把边界显式化（frame.go:34/153）。gosec 实锤的 off-by-one |
 | **切片别名** | `append` 复用底层数组会改到别人持有的切片 | `appendTo(dst)` 只追加不改已有内容；写循环用 `buf[:0]` 复用，**前提是不有人持有 buf 的切片** |
 | **`[]byte` 不能做 map 键** | 切片不可比较 | 路由名/主题名一律 `string`：Metadata 解码出来就是 string，且 map 查找需要可比、可作键 |
 | **map 迭代顺序随机** | 遍历结果每次都不同 | `Server.Sessions()` 显式 `sort.Strings`（对外可预期）；`Server.Publish` 遍历顺序无关紧要，故不排 |
-| **`sync.Once` 不可重入** | 在 `Do` 的函数体内再次调用同一个 `Do` → 自死锁 | `kill`/`Close` 的 `Do` 体内只做"置状态 + 通知"，不回调用户代码（transport.go:185、client.go:107） |
+| **`sync.Once` 不可重入** | 在 `Do` 的函数体内再次调用同一个 `Do` → 自死锁 | `kill`/`Close` 的 `Do` 体内只做"置状态 + 通知"，不回调用户代码（transport.go:205、client.go:107） |
 | **结构体零值不一定可用** | 零值 map 写入 panic、零值 mutex 拷贝即错 | `Config` 零值可用（`normalized()` 补默认值）；`flow` 零值**不可用**（`doneCh` 是 nil channel，收永远阻塞），所以只能经 `newFlow` 构造 |
 | **nil channel 永久阻塞** | 对 nil channel 的收发永远挂起 | `flow.doneCh`/`ackCh` 在 `newFlow` 里一律 `make`；`creditGate` 的 `notify` 同理 |
 | **值接收者 vs 指针接收者的方法集** | 值接收者的方法在指针上也可调用，反之不行 | `discardLogger` 用值接收者（config.go:125），于是 `discardLogger{}` 与 `&discardLogger{}` 都满足 `Logger` |
@@ -299,12 +299,12 @@ tr := newTransport(nc, br, …)   // ← 传的是 br 本身
 | 陷阱 | 现象 | 本仓库 |
 | --- | --- | --- |
 | **数据竞争 = 无 happens-before，与墙钟无关** | `sleep` 治不好竞态，只有 channel / `go` / 锁能建立边 | `flow.err` 的所有读取收口到 `doneState()`（flow.go:124）：裸读与 `finish` 的写竞争，race detector 实锤 |
-| **RWMutex 不可升级** | 持读锁时申请写锁 → 死锁 | 全部按"锁外取快照、锁内只改数据"写：`Server.Publish` 先快照 sessions 再逐个取 `ss.mu`（server.go:79-98） |
+| **RWMutex 不可升级** | 持读锁时申请写锁 → 死锁 | 全部按"锁外取快照、锁内只改数据"写：`Server.Publish` 先快照 sessions 再逐个取 `ss.mu`（server.go:81-106） |
 | **锁序倒置** | 两把锁交叉获取 → 死锁 | 明确记在 DESIGN.md §6.2：`store.mu → ss.mu` 不嵌套；`ss.mu → ep.streamsMu` 单向；`flow.mu` 锁内不调外部函数 |
 | **channel 提供 happens-before** | 收发本身就是同步边 | 全局的测试接缝（`jsonMarshal` 等）能安全替换，前提是"先写桩再 spawn"（design-notes §9 的顺序约束） |
 | **`sync.Pool` 两轮 GC 后清空** | 不是缓存，命中率取决于分配压力 | flate 读写器池化（transform.go:23/27）；取出即 `Reset`，保证不跨帧泄漏流状态 |
 | **`defer` 在循环里累积** | 长循环里 defer 到函数结束才执行 | handler 是一流一 goroutine，`defer` 随 goroutine 结束而执行（正确用法）；`Server.Publish` 的遍历循环内没有 defer |
-| **`time.After` 在循环里** | 老版本每个都起一个 runtime timer，循环里用会堆积 | 库里的 `writeLoop` 用 `NewTicker`+`Stop`（transport.go:111）；`resubscribeLocked` 的 `time.After` 是一次性 select，可接受。Go 1.23+ 起未被引用的 timer 可被 GC 回收（go.mod 声明 1.24，所以示例里的 `time.After` 循环也是安全的） |
+| **`time.After` 在循环里** | 老版本每个都起一个 runtime timer，循环里用会堆积 | 库里的 `writeLoop` 用 `NewTicker`+`Stop`（transport.go:130）；`resubscribeLocked` 的 `time.After` 是一次性 select，可接受。Go 1.23+ 起未被引用的 timer 可被 GC 回收（go.mod 声明 1.24，所以示例里的 `time.After` 循环也是安全的） |
 | **每流一 goroutine 的代价** | 初始栈 ~8KB，活跃流多了就是内存 | 换来的取消语义干净（`streamContext` 直接包 `doneCh`）。这是"goroutine 数量换语义"的有意识取舍（DESIGN.md §6.1） |
 | **goroutine 泄漏的三种形态** | 阻塞在无人关闭的 channel / 阻塞在不返回的读 / 循环体永不退出 | 收尾单点化在 `transport.kill`（关 dead + 关 credit 闸门 + 关 conn）；`Server.handleConn` 用 `defer nc.Close()` 兜住握手失败路径 |
 

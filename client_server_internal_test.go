@@ -756,10 +756,10 @@ func TestClientAPIAfterClose(t *testing.T) {
 	if _, err := c.Subscribe(ctx, "t", func(*Message) error { return nil }); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Subscribe = %v", err)
 	}
-	if err := c.SendOneWay("r", item{}); !errors.Is(err, ErrClosed) {
+	if err := c.SendOneWay(ctx, "r", item{}); !errors.Is(err, ErrClosed) {
 		t.Fatalf("SendOneWay = %v", err)
 	}
-	if err := c.Publish("t", item{}); !errors.Is(err, ErrClosed) {
+	if err := c.Publish(ctx, "t", item{}); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Publish = %v", err)
 	}
 }
@@ -830,7 +830,7 @@ func TestNewServerTransformerError(t *testing.T) {
 // Publish 的载荷编码失败（store 访问之前即返回）。
 func TestServerPublishMarshalError(t *testing.T) {
 	srv := &Server{}
-	if err := srv.Publish("t", make(chan int)); err == nil {
+	if err := srv.Publish(context.Background(), "t", make(chan int)); err == nil {
 		t.Fatal("expected marshal error")
 	}
 }
@@ -882,7 +882,7 @@ func TestServerInitiatorsUnknownSession(t *testing.T) {
 	if _, err := srv.Channel(ctx, "ghost", "r", item{}); err == nil {
 		t.Fatal("Channel")
 	}
-	if err := srv.SendOneWay("ghost", "r", item{}); err == nil {
+	if err := srv.SendOneWay(ctx, "ghost", "r", item{}); err == nil {
 		t.Fatal("SendOneWay")
 	}
 }

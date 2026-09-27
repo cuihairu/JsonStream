@@ -410,13 +410,13 @@ func (ep *endpoint) doChannel(ctx context.Context, route string, payload any) (*
 	return &Channel{f: flw, ctx: ctx}, nil
 }
 
-// doOneWay 单向发送；协议保证不产生任何响应帧。
-func (ep *endpoint) doOneWay(route string, payload any) error {
+// doOneWay 单向发送；协议保证不产生任何响应帧。ctx 约束入队等待。
+func (ep *endpoint) doOneWay(ctx context.Context, route string, payload any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	return ep.tr.send(&Frame{
+	return ep.tr.sendCtx(ctx, &Frame{
 		Header:   Header{Version: ProtocolVersion, Type: TypeOneWay, StreamID: ep.allocID()},
 		Metadata: encodeMeta(route, ""),
 		Payload:  data,
@@ -457,12 +457,13 @@ func (ep *endpoint) doSubscribe(ctx context.Context, topic string, h func(*Messa
 }
 
 // doPublish 把消息发布到对端主题（client→server 方向；server 广播见 Server.Publish）。
-func (ep *endpoint) doPublish(topic string, payload any) error {
+// ctx 约束入队等待。
+func (ep *endpoint) doPublish(ctx context.Context, topic string, payload any) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	return ep.tr.send(&Frame{
+	return ep.tr.sendCtx(ctx, &Frame{
 		Header:   Header{Version: ProtocolVersion, Type: TypePublish, StreamID: ep.allocID()},
 		Metadata: encodeMeta("", topic),
 		Payload:  data,

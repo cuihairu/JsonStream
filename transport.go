@@ -71,7 +71,25 @@ func (t *transport) rawWrite(f *Frame) error {
 
 // send 把帧交给写循环；连接已死时返回错误。
 // 受背压约束的调用方必须先 takeCredit。
+// 内部机械路径（心跳、信用回授、保留帧重放）没有调用方超时，恒用
+// context.Background()——语义与旧版 send 完全一致。
 func (t *transport) send(f *Frame) error {
+	return t.sendCtx(context.Background(), f)
+}
+
+// sendCtx 是 send 的带截止版本：SendOneWay/Publish 族的调用方 ctx 经它
+// 把「对端停滞导致 sendCh 排满」的无界等待也纳入调用方超时——只约束
+// waitEp 的话，活连接上的满队列仍会让带 deadline 的调用挂死，ctx 参数
+// 就成了半真话。
+func (t *transport) sendCtx(ctx context.Context, f *Frame) error {
+	// ctx 预检先于 dead 预检：已过期的 ctx 必须确定性地拒绝发送，不能
+	// 与有可用空位的 sendCh 进 select 赌随机性——同一次调用可能既发出帧
+	// 又返回错误，比"晚一点发现取消"更糟。
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
 	// dead 优先预检：连接死后 sendCh 仍有空位，不加预检则 select 双就绪
 	// 随机选择——同一次 kill 后的 send 会不确定性地产出 nil（帧入队但
 	// 永不写出，静默丢失）或 ErrClosed。
@@ -85,6 +103,8 @@ func (t *transport) send(f *Frame) error {
 		return nil
 	case <-t.dead:
 		return ErrClosed
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

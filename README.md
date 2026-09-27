@@ -151,8 +151,8 @@ Stream ID 按发起方分奇偶（客户端奇数、服务端偶数），和 HTT
 
 ### 测试与质量结果
 
-- 库包语句覆盖率 **100.0%**（1347/1347，`go test -coverprofile` 实测），CI 有门禁（跌破即失败）。**两个示例包也有测试**：服务端示例 99.0%、客户端示例 96.5%——余下 5 条是"连接恰好在这一瞬间死掉"才失败的窄竞态分支，DESIGN.md §11.3 逐条列了原因，也说明了为什么不为了覆盖率去改示例的形状。
-- 199 个测试/基准函数（187 测试 + 9 基准 + 3 fuzz 靶），覆盖契约、集成、并发时序构造；`examples/` 从"零测试的展示代码"变成"被真实客户端端到端跑过"。
+- 库包语句覆盖率 **100.0%**（1338/1338，`go test -coverprofile` 实测），CI 有门禁（跌破即失败）。**两个示例包也有测试**：服务端示例 99.0%、客户端示例 96.8%——余下 5 条是"连接恰好在这一瞬间死掉"才失败的窄竞态分支，DESIGN.md §11.3 逐条列了原因，也说明了为什么不为了覆盖率去改示例的形状。
+- 202 个测试/基准函数（190 测试 + 9 基准 + 3 fuzz 靶），覆盖契约、集成、并发时序构造；`examples/` 从"零测试的展示代码"变成"被真实客户端端到端跑过"。
 - `-race -count=2` 全绿；goroutine 泄漏守卫（20 并发客户端回归基线 ±2）。
 - 三条 fuzz 靶（帧解析/变换层/握手状态机）长跑累计千万级 execs 零 crash，实锤修复 2 个真 bug（上文 1、2）。CI 里还有一层 fuzz 冒烟：靶名自动发现、每靶固定 20s 预算、崩溃即失败并把 crash 语料落成 `testdata/fuzz/` 回归用例（DESIGN §11.4）。
 - 六件静态检查零告警：staticcheck、vet、gofmt、revive、gosec、gocritic；govulncheck 零可触达漏洞；nilness 零告警——**全部已纳入 CI 门禁**（双工具链腿：1.24 证 go.mod 的最老支持版本可构建可测试，stable 腿承载工具，工具全部钉在实测兼容的版本）。
@@ -179,7 +179,7 @@ go build ./...
 go test ./...
 go vet ./...
 
-# 覆盖率：库包 100.0%（CI 门禁），examples/server 99.0%，examples/client 96.5%
+# 覆盖率：库包 100.0%（CI 门禁），examples/server 99.0%，examples/client 96.8%
 go test -cover ./...
 
 # 性能基准
@@ -209,8 +209,10 @@ m, _ := c.Request(ctx, "math.add", map[string]int{"a": 2, "b": 40}) // 请求/�
 s, _ := c.Stream(ctx, "range", map[string]int{"n": 100})           // 流式
 defer s.Cancel()
 sub, _ := c.Subscribe(ctx, "ticks", func(m *jsonstream.Message) error { return nil })
-_ = c.Publish("metrics", v) // client → server
+_ = c.Publish(ctx, "metrics", v) // client → server
 ```
+
+发起类 API 一律以 `ctx` 打头：`SendOneWay`/`Publish`（Client 与 Server 两侧）与 `Request`/`Stream`/`Channel` 同规，ctx 约束「等可用连接」与「等发送入队」两段等待（DESIGN §8.4）。仓库未发版（无 tag），该参数是就地破坏性变更，不为旧签名留别名——旧行为等价于传 `context.Background()`。
 
 压缩/加密/背压都是参数化开关，握手协商后生效（双方都开才启用）：
 

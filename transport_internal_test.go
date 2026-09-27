@@ -2,6 +2,7 @@ package jsonstream
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -54,6 +55,46 @@ func TestTransportSendUnblockedByKill(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("kill did not unblock send stuck on full sendCh")
+	}
+}
+
+// sendCtx 的 ctx 预检：已取消的 ctx 在活连接上必须确定性拒绝、不留帧在
+// 队列里——不预检而与可用空位进 select 赌随机性的话，同一次调用可能既
+// 入队又报错，对"发没发出去"二义。
+func TestTransportSendCtxExpired(t *testing.T) {
+	tr, _ := newTestTransport(t, shortConfig(), 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := tr.sendCtx(ctx, &Frame{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("sendCtx with cancelled ctx = %v, want context.Canceled", err)
+	}
+	if n := len(tr.sendCh); n != 0 {
+		t.Fatalf("cancelled sendCtx enqueued %d frame(s)", n)
+	}
+}
+
+// sendCtx 阻塞在满载 sendCh 上时 ctx 取消：确定性走 ctx 分支返回取消
+// 错误——对端停滞（写循环排不空队列）时，带 deadline 的发送不再无限等，
+// 这是 SendOneWay/Publish 族 ctx 参数的第二段语义（第一段是等连接）。
+func TestTransportSendCtxUnblockedByCancel(t *testing.T) {
+	tr, _ := newTestTransport(t, shortConfig(), 0)
+	for i := 0; i < cap(tr.sendCh); i++ {
+		tr.sendCh <- &Frame{}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	done := make(chan error, 1)
+	go func() { done <- tr.sendCtx(ctx, &Frame{}) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("sendCtx unblocked by cancel = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancel did not unblock sendCtx stuck on full sendCh")
 	}
 }
 

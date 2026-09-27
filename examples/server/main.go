@@ -165,9 +165,10 @@ func registerHandlers(srv *jsonstream.Server) {
 	})
 }
 
-// broadcastLoop 周期向 ticks 主题广播。Publish 的错误只有"载荷无法 JSON
-// 编码"一种来源，而这里的载荷是固定结构的 map，恒可编码——所以返回值按
-// 例忽略。真实代码里遇到来源不确定的错误则必须处理。
+// broadcastLoop 周期向 ticks 主题广播。Publish 传本循环的生命周期 ctx：
+// 关停时不再发起新一轮扇出；错误来源是"载荷无法 JSON 编码"与"ctx 取消
+// 中途截断扇出"两种，前者对固定结构的 map 恒不发生、后者正是想要的
+// 关停语义——所以返回值按例忽略。真实代码里遇到来源不确定的错误则必须处理。
 func broadcastLoop(ctx context.Context, srv *jsonstream.Server, every time.Duration) {
 	for tick := 0; ; tick++ {
 		select {
@@ -175,7 +176,7 @@ func broadcastLoop(ctx context.Context, srv *jsonstream.Server, every time.Durat
 			return
 		case <-time.After(every):
 		}
-		_ = srv.Publish("ticks", map[string]any{"tick": tick, "at": time.Now().Format(time.Kitchen)})
+		_ = srv.Publish(ctx, "ticks", map[string]any{"tick": tick, "at": time.Now().Format(time.Kitchen)})
 	}
 }
 
@@ -195,16 +196,17 @@ func notifyLoop(ctx context.Context, srv *jsonstream.Server, every, timeout time
 	}
 }
 
-// notify 向一个会话发通知并回读一次时间。两步的失败对 demo 是同一件事
-// （这个会话此刻不配合），合并成一个错误出口，省掉调用点一处重复分支。
+// notify 向一个会话发通知并回读一次时间。两步共用一个带超时的 ctx——
+// 两步的失败对 demo 是同一件事（这个会话此刻不配合），合并成一个错误
+// 出口，省掉调用点一处重复分支。对端交互必须带超时：客户端不实现
+// client.time 或卡死时，无超时的 Request 会永久挂起并停摆整个通知循环；
+// SendOneWay 同理——它的超时约束的是等入队，对端停滞时不再无限等。
 func notify(srv *jsonstream.Server, sessionID string, timeout time.Duration) error {
-	if err := srv.SendOneWay(sessionID, "client.notice", map[string]string{"text": "server says hi"}); err != nil {
-		return err
-	}
-	// 对端请求必须带超时：客户端不实现 client.time 或卡死时，无超时的
-	// Request 会永久挂起并停摆整个通知循环。
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	if err := srv.SendOneWay(ctx, sessionID, "client.notice", map[string]string{"text": "server says hi"}); err != nil {
+		return err
+	}
 	m, err := srv.Request(ctx, sessionID, "client.time", nil)
 	if err != nil {
 		return err

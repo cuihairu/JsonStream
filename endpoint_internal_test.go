@@ -337,10 +337,10 @@ func TestEndpointDoXxxMarshalError(t *testing.T) {
 	if _, err := ep.doChannel(ctx, "r", make(chan int)); err == nil {
 		t.Fatal("doChannel: expected marshal error")
 	}
-	if err := ep.doOneWay("r", make(chan int)); err == nil {
+	if err := ep.doOneWay(ctx, "r", make(chan int)); err == nil {
 		t.Fatal("doOneWay: expected marshal error")
 	}
-	if err := ep.doPublish("t", make(chan int)); err == nil {
+	if err := ep.doPublish(ctx, "t", make(chan int)); err == nil {
 		t.Fatal("doPublish: expected marshal error")
 	}
 	if n := len(ep.snapshot()); n != 0 {

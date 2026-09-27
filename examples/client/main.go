@@ -146,14 +146,19 @@ func runWith(o runOptions, addr string) error {
 	_ = ch.Close()
 
 	// ---- 单向发送 + 客户端 → 服务端主题发布 ----
-	// 注意 API 的不对称：SendOneWay/Publish 没有 ctx 参数（v1 沿用了
-	// "不需要返回的交互不带上下文"的直觉），它们在连接断开时等的是重连
-	// 而不是调用方超时。带 ctx 的调用（Subscribe/Request/Stream/Channel/
-	// Next/Receive）上面都设了上限。
-	if err := c.SendOneWay("notify", map[string]string{"text": "fire and forget"}); err != nil {
+	// 与上面的带 ctx 调用同一纪律：连"不指望响应"的发送也设上限——
+	// 断连时它们等的是重连（连接回来才发），上限约束的是"等多久"，
+	// 对端停滞排满发送队列时同理。
+	owCtx, cancel := context.WithTimeout(ctx, o.callTTL)
+	err = c.SendOneWay(owCtx, "notify", map[string]string{"text": "fire and forget"})
+	cancel()
+	if err != nil {
 		return err
 	}
-	if err := c.Publish("metrics", map[string]int{"cpu": 42}); err != nil {
+	pubCtx, cancel := context.WithTimeout(ctx, o.callTTL)
+	err = c.Publish(pubCtx, "metrics", map[string]int{"cpu": 42})
+	cancel()
+	if err != nil {
 		return err
 	}
 	log.Printf("sent oneway + published metrics")

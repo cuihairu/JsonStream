@@ -114,8 +114,8 @@ writeLoop: sendCh → outbound 变换 → conn.Write
 - **握手**（CONNECT/CONNACK 恒明文）：双方在写循环启动**之前**用 `rawWrite`/`writeOnce` 同步直写——握手期没有并发写出者，不需要串行化设施；`bufio.Reader` 在握手与 transport 间传递（`transport.reader` 字段），避免缓冲区里已读出的帧丢失。
 - **生效参数**：`effectiveConnack`（handshake.go:51）——compress/encrypt 是与（双方都开才开），credit 取 min（任一方 0 即整体关闭），心跳以服务端为权威，客户端 `bindSession` 用 CONNACK 回写的参数重建 transformer 与 endpoint。
 - **连接死亡**：唯一入口 `transport.kill`（deadOnce 保证单次）：`close(dead)` → 关 credit 闸门 → `conn.Close()` → `go onDead(err)`。所有等待者（send 的 select、takeCredit、connectLoop 的 `<-tr.dead`）通过 dead channel 感知。
-- **重连**（client.go:215 connectLoop）：退避 = 初始值 ×2 至上限，叠加 `0.5+0.5×rand` 抖动（防重连风暴同步化）；断开后先退避一拍再重拨——立即重连常抢在服务端感知断连之前，把本该判「会话过期」的重连误判成 takeover 恢复。
-- **会话保留/恢复**（server.go:384 起）：unbind 启动保留期 timer；重连 `bind` 做 takeover（杀旧连接）→ 迁移奇数流 → 停 timer → 重放 retained；溢出（retainedBytes > 4MiB）则会话失去恢复资格。
+- **重连**（client.go:217 connectLoop）：退避 = 初始值 ×2 至上限，叠加 `0.5+0.5×rand` 抖动（防重连风暴同步化）；断开后先退避一拍再重拨——立即重连常抢在服务端感知断连之前，把本该判「会话过期」的重连误判成 takeover 恢复。
+- **会话保留/恢复**（server.go:395 起）：unbind 启动保留期 timer；重连 `bind` 做 takeover（杀旧连接）→ 迁移奇数流 → 停 timer → 重放 retained；溢出（retainedBytes > 4MiB）则会话失去恢复资格。
 
 ## 4. 流式解析：三个层次的"流"，以及为什么每一层都选了不同的解法
 
@@ -182,7 +182,7 @@ hf, _ := ReadFrame(br)             // …读 CONNECT（可能把 CONNACK 的前�
 tr := newTransport(nc, br, …)      // ← 关键：把 br 本身交给 transport，不新建
 ```
 
-`transport` 因此有一个类型是 `io.Reader` 而不是 `*bufio.Reader` 的字段（transport.go:17，注释写明"与握手阶段共享的 bufio，避免缓冲数据丢失"）。如果这里写成 `bufio.NewReaderSize(conn, …)`（`readLoop` 里确实又包了一层，见 transport.go:156），第二层 bufio 会从 conn 重新取字节，而握手阶段的 br 缓冲里那几字节就被永久跳过——表现为"偶发丢第一帧"，且只在 CONNACK 与首个数据帧同批到达时出现，极难复现。
+`transport` 因此有一个类型是 `io.Reader` 而不是 `*bufio.Reader` 的字段（transport.go:17，注释写明"与握手阶段共享的 bufio，避免缓冲数据丢失"）。如果这里写成 `bufio.NewReaderSize(conn, …)`（`readLoop` 里确实又包了一层，见 transport.go:175），第二层 bufio 会从 conn 重新取字节，而握手阶段的 br 缓冲里那几字节就被永久跳过——表现为"偶发丢第一帧"，且只在 CONNACK 与首个数据帧同批到达时出现，极难复现。
 
 注意 `readLoop` 里那层 `bufio.NewReaderSize` 之所以**安全**，是因为它包的是 `t.reader`（那个共享的 br）而不是 `conn`：多一层缓冲只多一次内存拷贝，不会跨阶段抢字节。这个"看起来像冗余、实际是兜底"的写法值得在 code review 里明确说明，否则下一个人会"顺手优化掉"它。
 
@@ -251,7 +251,7 @@ type transport struct {
 }
 ```
 
-### 5.5 serverSession / sessionStore（server.go:388）
+### 5.5 serverSession / sessionStore（server.go:399）
 
 ```go
 type serverSession struct {
@@ -301,7 +301,7 @@ type serverSession struct {
 
 所有出站帧（数据、错误、CANCEL、CREDIT、心跳）进同一条 sendCh，由写循环单点写出。备选：`sync.Mutex` 包住 conn.Write——更直接，但三个理由选 channel：(1) 写循环要与心跳 ticker 做 `select`，mutex 模式下心跳注入需要独立的 ticker goroutine 或定时抢锁；(2) sendCh 天然有 256 帧的缓冲，应用 goroutine 与 socket 速度解耦，等价于一层小发送窗口；(3) close(dead) 之后 send 返回 ErrClosed 的语义可以和 select 自然组合。代价是写循环 goroutine 本身与一次 channel 往返（~百 ns 级，相对网络 RTT 可忽略）。
 
-send 的死连接预检（transport.go:78）是被真 bug 逼出来的：连接死后 sendCh 常有空位，`select` 双就绪随机选择，同一次 kill 后的 send 会不确定性地产出"帧入队但永不写出"或 ErrClosed——**Go 的 select 随机性在错误路径上是真陷阱**，消灭它的办法是给死分支优先预检。
+send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接死后 sendCh 常有空位，`select` 双就绪随机选择，同一次 kill 后的 send 会不确定性地产出"帧入队但永不写出"或 ErrClosed——**Go 的 select 随机性在错误路径上是真陷阱**，消灭它的办法是给死分支优先预检。
 
 ### 6.4 确定性交付：排空语义
 
@@ -322,7 +322,7 @@ send 的死连接预检（transport.go:78）是被真 bug 逼出来的：连接�
 - **panic 一律 recover 在协议栈边界**（runRequest/serveOneWay/topic handler 三处），单条流的应用崩溃绝不带崩进程，也不会泄漏未终结的 flow（recover 路径同样走到 finish/错误帧）。
 - **错误帧的编解码有兜底**：`errDecode` 对不可解码载荷归一为 INTERNAL，而不是把对端的畸形错误帧变成连接级失败。
 - **资源释放单点化**：连接关闭只在 kill 一处（deadOnce 幂等）；`Server.handleConn` 用 defer Close 兜底握手失败路径；`Subscription.Close`/`Client.Close` 都是 `sync.Once`/幂等语义——**释放接口必须可重入**，否则使用方的 defer 链里必然出现 double-close。
-- **断连即败的"无意义等待"剪除**：服务端发起的流（偶数 ID）响应是上行、不缓存，断连后等待必然落空，onDead 立即 fail（server.go:366 注释）；客户端发起的 responder 流归会话保留，两类流在同一次断连里的命运不同，这是 at-least-once 语义的直接推论。
+- **断连即败的"无意义等待"剪除**：服务端发起的流（偶数 ID）响应是上行、不缓存，断连后等待必然落空，onDead 立即 fail（server.go:379 注释）；客户端发起的 responder 流归会话保留，两类流在同一次断连里的命运不同，这是 at-least-once 语义的直接推论。
 - **一处已知的类型系统盲区**：`asStreamError`（message.go:108）用 `err.(*Error)` 做类型断言，若应用返回的是**类型为 nil 的 `*Error`**（`var e *Error; return nil, e` 这类写法），断言会成功并返回 nil，随后 `errorFrame` 把 `nil` 编码成 `null`，对端 `errDecode` 因 `code==0` 归一为 INTERNAL。结论是**降级而非崩溃**（typed-nil-in-interface 陷阱的典型形态），但错误信息会丢失。要彻底消除得写成 `if e, ok := err.(*Error); ok && e != nil`——没改的原因是它会让"应用故意返回 nil *Error"这种病态写法更难被察觉，而降级后的行为已经安全；这一点在此显式记录，作为已知边界而不是遗漏。
 
 ## 8. 边界情况清单
@@ -334,14 +334,14 @@ send 的死连接预检（transport.go:78）是被真 bug 逼出来的：连接�
 | 边界情况 | 处置 | 位置 | 为什么 |
 | --- | --- | --- | --- |
 | 帧头跨 TCP 分段（半包） | `io.ReadFull` 读满 14B 或报错 | frame.go:170 | 半包是常态不是异常；ReadFull 内部循环消化 |
-| 一条连接上多帧粘包 | bufio 缓冲 + ReadFull 精确取长 | frame.go:170, transport.go:156 | 缓冲解决 syscall 次数，ReadFull 解决取字节数 |
+| 一条连接上多帧粘包 | bufio 缓冲 + ReadFull 精确取长 | frame.go:170, transport.go:175 | 缓冲解决 syscall 次数，ReadFull 解决取字节数 |
 | 坏魔数 / 版本不符 / 保留位非零 | Malformed → 断连 | frame.go:173/184/187 | 保留位非零意味着"我们不知道对端在用什么扩展语义"，猜错比断开糟 |
 | `payloadLen` 超过 16MiB | Malformed，**在 `make` 之前** | frame.go:191 | 顺序即安全：先分配后校验 = 把 OOM 开关交给对端 |
 | `metaLen` 恰为 64KiB | 编码端拒（上限 = `math.MaxUint16`） | frame.go:34/134 | 上界必须等于字段可表达的真值，65536 无法用 uint16 表达（gosec 实锤的 off-by-one） |
 | `FlagHasMeta` 置位但元数据为空 | 仍写出 metaLen 段（长度 0） | frame.go:150 | 保证 parse∘encode = id：否则"声称有 meta 却不带段"的自相矛盾帧（fuzz 实锤） |
 | 载荷恰好 0 字节 | `Payload` 保持 nil，不分配 | frame.go:207 | 0 长度帧合法（心跳/控制帧）；`make([]byte, 0)` 会返回非 nil 空切片，破坏判等 |
 | 未知帧类型 | PROTOCOL → 断连且**不回帧** | endpoint.go:219 | 连类型都不认识说明对端是异版本实现，回帧的互通前提已不成立 |
-| 握手期恶意慢连接 | 整体 deadline = DialTimeout | server.go:217 | 不给握手期读设上限，一个连上不发字节的连接就能占住一个 goroutine |
+| 握手期恶意慢连接 | 整体 deadline = DialTimeout | server.go:226 | 不给握手期读设上限，一个连上不发字节的连接就能占住一个 goroutine |
 
 ### 8.2 变换层：压缩与加密的对端输入
 
@@ -360,11 +360,11 @@ send 的死连接预检（transport.go:78）是被真 bug 逼出来的：连接�
 | --- | --- | --- | --- |
 | 帧到达时流已终结（迟到的 RESPONSE/COMPLETE） | 静默忽略 | endpoint.go:118 | CANCEL 与在途帧的竞态下属正常，不是协议错误 |
 | 终结帧与数据帧同时就绪 | 消费端先排空 `frames` | flow.go:181/272 | `select` 双就绪随机选择，不排空会**随机**丢最后一帧 |
-| 死连接上 `send` 的 select 双就绪 | `dead` 分支优先预检 | transport.go:78 | 否则同一次 kill 后的 send 不确定地产出 nil（帧入队但永不写出，静默丢失） |
-| 重连后 Stream ID 撞号 | 计数器跨重连单调过继 | client.go:376 | 撞号时旧流迟到的 COMPLETE 会误杀新注册的同 ID 流（实测 bug） |
+| 死连接上 `send` 的 select 双就绪 | `dead` 分支优先预检 | transport.go:93 | 否则同一次 kill 后的 send 不确定地产出 nil（帧入队但永不写出，静默丢失） |
+| 重连后 Stream ID 撞号 | 计数器跨重连单调过继 | client.go:379 | 撞号时旧流迟到的 COMPLETE 会误杀新注册的同 ID 流（实测 bug） |
 | 订阅句柄持有创建时的 endpoint | 出站一律 `currentEP()` | flow.go:229/370 | 陈旧引用让 CANCEL/UNSUBSCRIBE 发给死连接被静默吞 |
-| 会话恢复时 responder 流不迁移 | `bind` 连 handler 一起搬 | server.go:444 | handler 悬空会白产帧，把保留队列撑爆并连坐整个会话 |
-| 服务端发起的流在断连后 | 立即 fail，不等响应 | server.go:374 | 响应是上行、不缓存，等待必然落空 |
+| 会话恢复时 responder 流不迁移 | `bind` 连 handler 一起搬 | server.go:442 | handler 悬空会白产帧，把保留队列撑爆并连坐整个会话 |
+| 服务端发起的流在断连后 | 立即 fail，不等响应 | server.go:385 | 响应是上行、不缓存，等待必然落空 |
 | credit 额度在断连时归零 | 失败改道保留队列，不拦截 | message.go:97 | 否则连接级流控泄漏进会话级语义，破坏 at-least-once（实测 bug） |
 | handler panic | recover → INTERNAL 错误帧 + 流终结 | endpoint.go:273 | 应用崩溃不带崩进程，也不泄漏未终结的 flow |
 | 应用返回 typed-nil `*Error` | 降级为 INTERNAL | message.go:108 | typed-nil-in-interface 陷阱；见 §7 末条 |
@@ -377,7 +377,7 @@ send 的死连接预检（transport.go:78）是被真 bug 逼出来的：连接�
 | 边界情况 | 处置 | 位置 | 为什么 |
 | --- | --- | --- | --- |
 | `Heartbeat` 配得过小（<1s） | 归一为 1s | config.go:99 | 心跳是防御参数，暴露成可调就一定会有人调到把连接打挂 |
-| `Retention` 为负 | 禁用会话恢复 | server.go:476 | "不保留"要有一个显式表达，不能靠 0 撞上"取默认值" |
+| `Retention` 为负 | 禁用会话恢复 | server.go:490 | "不保留"要有一个显式表达，不能靠 0 撞上"取默认值" |
 | `Credit ≤ 0` | 不启用背压，闸门为 nil | endpoint.go:46 | nil 闸门的 `take` 直接放行，是"关闭"而非"坏掉" |
 | `Credit` 窗口为 1 | `creditFlushAt` 下限钳到 1 | endpoint.go:49 | 半窗为 0 会导致"永远攒不到回授"——额度只减不增，流必然饿死 |
 | ONEWAY 路由不存在 | 静默丢弃，不回帧也不记日志 | endpoint.go:333 | ONEWAY 是高频路径，可被随机路由刷爆日志——那等于把 DoS 面开进可观测性 |
@@ -385,7 +385,7 @@ send 的死连接预检（transport.go:78）是被真 bug 逼出来的：连接�
 | `nil` 接收者的 `ReadStream`/`Subscription` | 全部方法 no-op 返回 | flow.go:182/216/230 | 使用方的 `defer s.Cancel()` 在出错路径上可能对着 nil 调用 |
 | `Cancel`/`Close` 二次调用 | 幂等 | flow.go:230/299 | 释放接口必须可重入（§7 配套纪律） |
 | 加密启用但密钥不是 32B | 构造期失败，不建连接 | transform.go:51 | 配置错误要在握手前暴露，而不是让每一帧都失败 |
-| `SendOneWay`/`Publish` 无 ctx 参数 | 内部用 `context.Background()` | client.go:181/190 | **已知 API 不对称**：连接断开时这两个调用等的是重连而非调用方超时；服务端消失时会一直等。补 ctx 参数是 v1 之后的 API 演进项（见 §11.3 对应的覆盖率说明） |
+| `SendOneWay`/`Publish` 曾无 ctx 参数（API 不对称） | 已补 ctx：Client/Server 各自的 `SendOneWay` 与 `Publish` 四个入口，ctx 约束「等可用连接」（waitEp）与「等发送入队」（sendCtx）两段 | client.go:181/191、server.go:72/182 | 原不对称的代价：断连时调用等的是重连而非调用方超时，服务端消失就无限等。**兼容策略**：仓库未发版（无 tag、无外部消费者），就地破坏性变更，不为旧签名留别名；旧行为等价于传 `context.Background()`，而内部机械路径（downSink 投递、信用回授、保留帧重放）也恒用 Background——语义与旧 `send` 完全一致 |
 
 ## 9. 复杂度分析
 
@@ -454,7 +454,7 @@ send 的死连接预检（transport.go:78）是被真 bug 逼出来的：连接�
 - **D5 被动流注册同步、handler 执行异步**（endpoint.go:205 注释）。`prepareRequest` 在 readLoop 的同步路径完成路由查找/校验/注册，`runRequest` 才进 goroutine。备选：全异步（注册也在 goroutine 里）——放弃，对端发起 Channel 后会立即发数据帧，注册晚于数据帧到达时 lookupFlow miss，帧被静默丢弃，双方死等（实测会发生的互锁）。同步注册的代价是 readLoop 被路由表查找（RLock）短暂占用，可忽略。
 - **D6 flow 终结 = close(doneCh) 单原语**。备选：状态枚举 + 轮询——放弃，close 的广播语义让所有等待方一次感知，且 streamContext 直接把 doneCh 包装成 context.Context，handler 的 ctx 取消免费获得。
 - **D7 出站一律经当前 endpoint**（flow.currentEP()）。备选：流持有构造时的 endpoint——被 bug 9-6 实锤放弃：重连后 CANCEL/UNSUBSCRIBE 发给死连接被静默吞掉，对端 handler 永远收不到取消。`currentEP()` 的锁开销换消灭一整类陈旧引用 bug。
-- **D8 Stream ID 奇偶 + 跨重连单调**。奇偶（HTTP/2 同思路）让新到帧无需协商即可判归属；`bindSession` 把 `oldEp.nextID` 过继给新端点（client.go:376）——重置会让新流与迁移流撞号，旧连接迟到的 COMPLETE 误杀新流（bug 9-5）。
+- **D8 Stream ID 奇偶 + 跨重连单调**。奇偶（HTTP/2 同思路）让新到帧无需协商即可判归属；`bindSession` 把 `oldEp.nextID` 过继给新端点（client.go:379）——重置会让新流与迁移流撞号，旧连接迟到的 COMPLETE 误杀新流（bug 9-5）。
 - **D9 会话保留 per-session 内存队列 + 字节上限 + 溢出降级**。备选：写磁盘/外部 broker（题面外）、无上限（OOM 开关）、溢出即断会话（过于激进——降级为"失去恢复资格但连接可用"既防 OOM 又不惩罚已建立的连接）。
 - **D10 心跳由写循环注入、死活由读 deadline 判定**。写侧 ticker 到期发 PING，读侧每帧重置 `SetReadDeadline(1.5×间隔)`。备选：TCP keepalive（探不到对端进程死锁/GC 停顿——它测的是内核协议栈）；读侧主动探测（会把心跳职责和读职责搅在一起）。1.5× 是容忍一次丢帧抖动与判死速度的折中。
 - **D11 flate 编解码器 sync.Pool 按帧复用**。实测每帧新建 writer 代价 ~1.3ms/~800KB 分配，池化 + Reset 后压缩往返 4.1 倍提速、分配降 162 倍（README 基准）。备选：每帧新建（太贵）、连接级单实例（读写循环已在单 goroutine 内，但订阅消费与 handler 并发 Emit 会竞争）。
@@ -469,7 +469,7 @@ send 的死连接预检（transport.go:78）是被真 bug 逼出来的：连接�
 | --- | --- | --- |
 | `jsonstream`（库） | **100.0%** | CI 有门禁（`.github/workflows/ci.yml`），跌破即失败 |
 | `examples/server` | 99.0% | 1 条未覆盖，见 §11.3 |
-| `examples/client` | 96.5% | 4 条未覆盖，见 §11.3 |
+| `examples/client` | 96.8% | 4 条未覆盖，见 §11.3 |
 
 库包覆盖率 100% 的含义要说准：**没有任何"测不到就是死码"的托词**——防御性分支靠五个包级接缝（jsonMarshal/aesNewCipher/gcmNew/randRead/resubAckTimeout）覆盖，其余靠并发时序构造覆盖（design-notes §9）。测试方法学（确定性并发、race detector 纪律）也在那一节。
 
@@ -503,7 +503,7 @@ send 的死连接预检（transport.go:78）是被真 bug 逼出来的：连接�
 | --- | --- | --- |
 | `examples/client` `Stream` | 连接在 `math.add` 响应之后、`Stream` 调用之前死掉 | 两者相隔微秒级；掐断 TCP 落在这个窗口里是概率事件 |
 | `examples/client` `Channel.Send` | 流在 `Channel` 返回后、`Send` 之前被终结 | 同上。服务端要等一个来回才可能终结流，那时 `Send` 早已发出 |
-| `examples/client` `SendOneWay` / `Publish` | 连接在调用前死掉 | 这两个 API **没有 ctx 参数**（§8.4 末行），内部等的是重连；服务端消失就永远等下去——构造出来的测试只会挂住，不会失败 |
+| `examples/client` `SendOneWay` / `Publish` | 连接在调用前死掉 | API 已带 ctx（§8.4），失败有界、原则上可测；但示例里这两步紧贴着上一个刚成功的调用，死亡窗口仍是微秒级。库包同款分支有确定性契约测试（`TestOneWayPublishCtxContracts`：活连接 + 已取消 ctx、断连 + deadline、服务端扇出前取消三向），示例不重复构造这个竞态 |
 | `examples/server` `chat` 的 `ch.Send` | 流在 handler 的 `Receive` 与 `Send` 之间被终结 | 同一个微秒级窗口。示例没开 credit，所以 `Channel.Send` 的失败路径只剩"流已终结"和"传输已死"两条，都要求死亡恰好插在 `Receive` 与 `Send` 之间 |
 
 刻意不去覆盖它们，理由是：为了覆盖率给示例代码加测试钩子、加 sleep，或把双工 handler 改写成一次性收发的形态，都是在破坏示例（它同时是文档、API 范例和面试展示物）的价值。库包里所有等价分支都有确定性测试覆盖——那才是覆盖率该保证的地方；而示例的价值在于"读起来是对的"，不在于"每行都执行过"。

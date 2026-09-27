@@ -344,10 +344,10 @@ func TestChatHandlerErrors(t *testing.T) {
 func TestOneWayAndPublish(t *testing.T) {
 	rs := startServe(t, nil)
 	c := rs.dial(t)
-	if err := c.SendOneWay("notify", map[string]string{"text": "ping"}); err != nil {
+	if err := c.SendOneWay(context.Background(), "notify", map[string]string{"text": "ping"}); err != nil {
 		t.Fatalf("oneway: %v", err)
 	}
-	if err := c.Publish("metrics", map[string]int{"cpu": 7}); err != nil {
+	if err := c.Publish(context.Background(), "metrics", map[string]int{"cpu": 7}); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 	// ONEWAY/PUBLISH 的 handler 各自跑在独立 goroutine 里（协议不回执），
