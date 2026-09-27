@@ -1,0 +1,33 @@
+# Codecov 状态门禁（v5 uploader 的配置文件，仓库根目录自动生效）。
+#
+# 与 CI 的分工：覆盖率真门禁在 ci.yml 里（go tool cover 语句口径 100%，
+# 跌破即红）；本文件只约束 Codecov 侧的线覆盖状态检查与上报范围，两者
+# 口径不同（语句 vs 行），不互相替代。
+codecov:
+  # 等 CI 全绿后再出 Codecov 状态：CI 红的时候没有裁决资格，避免
+  # 「CI 挂了但 Codecov 绿」的假信号。
+  require_ci_to_pass: true
+
+coverage:
+  status:
+    project:
+      default:
+        # 线覆盖口径当前 ≈99.85%（badge 按四舍五入显示 100%）——target
+        # 定 100% 会在下一次推送即红。99% 为目标，95..100 为容差带：
+        # 目标未达时落在带内仍放行，跌破 95% 必红。
+        target: 99%
+        range: 95..100
+    patch:
+      default:
+        # 新增/改动的行必须全覆盖——与仓库「语句覆盖 100%」同口径，
+        # 防止新代码带豁免落地。
+        target: 100%
+
+# 不参与覆盖率状态计算的范围：
+# - examples：示例包有独立的 100% 语句覆盖门禁（见 README「测试结果」）
+# - docs：文档站源码与构建产物（dist），无 Go 覆盖率
+# - assets：仓库静态资产（logo 等）
+ignore:
+  - "examples"
+  - "docs"
+  - "assets"
