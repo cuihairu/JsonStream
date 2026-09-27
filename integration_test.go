@@ -1321,6 +1321,98 @@ func TestStreamChannelHandlerPanic(t *testing.T) {
 	}
 }
 
+// TestTypedNilErrorClientSeesNormalizedInternal 是 typed-nil 降级契约的
+// 端到端应用侧视图（DESIGN §7 末条记录的盲区，此前只有文档没有测试）：
+// request/response 与 stream 两条 handler 臂都汇流到 asStreamError，返回
+// typed-nil 后应用实际收到的是归一形态 INTERNAL("undecodable error
+// payload")，而不是 nil error（err != nil 已为真，调用方不会误判成功）。
+// 断言的另一半是"降级而非崩溃"的完整含义：连接不涉案，后续流照常。
+func TestTypedNilErrorClientSeesNormalizedInternal(t *testing.T) {
+	_, addr := startTestServer(t, shortConfig(), func(s *Server) {
+		s.Handle("typed-nil", func(_ *Request) (any, error) {
+			var e *Error
+			return "value discarded on error", e
+		})
+		s.HandleStream("typed-nil-stream", func(_ *Request, _ Emitter) error {
+			var e *Error
+			return e
+		})
+		s.Handle("echo", func(req *Request) (any, error) {
+			var it item
+			return it, req.Decode(&it)
+		})
+	})
+	c := dialTest(t, addr, shortConfig())
+	ctx := context.Background()
+	var je *Error
+
+	_, err := c.Request(ctx, "typed-nil", nil)
+	if !errors.As(err, &je) || je.Code != CodeInternal || je.Message != "undecodable error payload" {
+		t.Fatalf("Request after typed-nil = %v, want INTERNAL 归一形态", err)
+	}
+
+	rs, err := c.Stream(ctx, "typed-nil-stream", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rs.Next(ctx); ok {
+		t.Fatal("typed-nil stream must not deliver frames")
+	}
+	if !errors.As(rs.Err(), &je) || je.Code != CodeInternal || je.Message != "undecodable error payload" {
+		t.Fatalf("stream Err after typed-nil = %v, want INTERNAL 归一形态", rs.Err())
+	}
+
+	// 存活证明走两条不同的流形态（同连接上 REQUEST 与 STREAM 都正常）。
+	m, err := c.Request(ctx, "echo", item{N: 5})
+	if err != nil {
+		t.Fatalf("connection must survive typed-nil errors: %v", err)
+	}
+	var it item
+	if err := m.Decode(&it); err != nil || it.N != 5 {
+		t.Fatalf("echo after typed-nil = %+v err=%v", it, err)
+	}
+}
+
+// TestTypedNilErrorDegradesOnWire 从裸连视角钉住同一条契约的线上形态：
+// 流级 ERROR（sid≠0）、载荷是字面量 `null`——真实客户端的 errDecode 会把
+// 这层事实归一掉，只有裸连能看到原文；随后同连接下一个 REQUEST 得到正常
+// RESPONSE，线上直证"错误只终结所在流、连接继续可用"。与上一条测试合成
+// 契约的两端：线上 `null` → 应用侧 INTERNAL。全程按帧序读写，无 sleep。
+func TestTypedNilErrorDegradesOnWire(t *testing.T) {
+	_, addr := startTestServer(t, shortConfig(), func(s *Server) {
+		s.Handle("typed-nil", func(_ *Request) (any, error) {
+			var e *Error
+			return item{N: 7}, e
+		})
+		s.Handle("ping", func(_ *Request) (any, error) { return item{N: 1}, nil })
+	})
+	rc := dialRaw(t, addr)
+	_ = rc.write(&Frame{Header: Header{Version: ProtocolVersion, Type: TypeConnect},
+		Payload: []byte(`{"version":1}`)})
+	if f := rc.read(t); f.Type != TypeConnAck {
+		t.Fatalf("first frame = %v, want CONNACK", f.Type)
+	}
+
+	_ = rc.write(&Frame{Header: Header{Version: ProtocolVersion, Type: TypeRequest, StreamID: 1},
+		Metadata: encodeMeta("typed-nil", "")})
+	f := rc.read(t)
+	if f.Type != TypeError || f.StreamID != 1 {
+		t.Fatalf("got %v sid=%d, want 流级 ERROR(sid=1)", f.Type, f.StreamID)
+	}
+	if string(f.Payload) != "null" {
+		t.Fatalf("typed-nil error payload on wire = %q, want \"null\"", f.Payload)
+	}
+	if e := errDecode(f.Payload); e.Code != CodeInternal {
+		t.Fatalf("peer-side decode of wire payload = %+v, want INTERNAL 归一", e)
+	}
+
+	_ = rc.write(&Frame{Header: Header{Version: ProtocolVersion, Type: TypeRequest, StreamID: 3},
+		Metadata: encodeMeta("ping", "")})
+	if f := rc.read(t); f.Type != TypeResponse || f.StreamID != 3 {
+		t.Fatalf("next stream on same connection = %v sid=%d, want RESPONSE(sid=3)", f.Type, f.StreamID)
+	}
+}
+
 // ---- 背压 ----
 
 // TestBackpressureBlocksSender：credit 窗口为 4 时，接收方不消费，发送方

@@ -323,7 +323,7 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 - **错误帧的编解码有兜底**：`errDecode` 对不可解码载荷归一为 INTERNAL，而不是把对端的畸形错误帧变成连接级失败。
 - **资源释放单点化**：连接关闭只在 kill 一处（deadOnce 幂等）；`Server.handleConn` 用 defer Close 兜底握手失败路径；`Subscription.Close`/`Client.Close` 都是 `sync.Once`/幂等语义——**释放接口必须可重入**，否则使用方的 defer 链里必然出现 double-close。
 - **断连即败的"无意义等待"剪除**：服务端发起的流（偶数 ID）响应是上行、不缓存，断连后等待必然落空，onDead 立即 fail（server.go:379 注释）；客户端发起的 responder 流归会话保留，两类流在同一次断连里的命运不同，这是 at-least-once 语义的直接推论。
-- **一处已知的类型系统盲区**：`asStreamError`（message.go:108）用 `err.(*Error)` 做类型断言，若应用返回的是**类型为 nil 的 `*Error`**（`var e *Error; return nil, e` 这类写法），断言会成功并返回 nil，随后 `errorFrame` 把 `nil` 编码成 `null`，对端 `errDecode` 因 `code==0` 归一为 INTERNAL。结论是**降级而非崩溃**（typed-nil-in-interface 陷阱的典型形态），但错误信息会丢失。要彻底消除得写成 `if e, ok := err.(*Error); ok && e != nil`——没改的原因是它会让"应用故意返回 nil *Error"这种病态写法更难被察觉，而降级后的行为已经安全；这一点在此显式记录，作为已知边界而不是遗漏。
+- **一处已知的类型系统盲区**：`asStreamError`（message.go:108）用 `err.(*Error)` 做类型断言，若应用返回的是**类型为 nil 的 `*Error`**（`var e *Error; return nil, e` 这类写法），断言会成功并返回 nil，随后 `errorFrame` 把 `nil` 编码成 `null`，对端 `errDecode` 因 `code==0` 归一为 INTERNAL。结论是**降级而非崩溃**（typed-nil-in-interface 陷阱的典型形态），但错误信息会丢失。要彻底消除得写成 `if e, ok := err.(*Error); ok && e != nil`——没改的原因是它会让"应用故意返回 nil *Error"这种病态写法更难被察觉，而降级后的行为已经安全；这一点在此显式记录，作为已知边界而不是遗漏。该契约现已有测试钉住（此前三段链条只存在于本节文字里）：`TestTypedNilErrorPayloadRoundTrip`（纯函数：断言返回 nil → 载荷 `null` → 对端归一 INTERNAL，三段逐环断言）、`TestTypedNilErrorDegradesOnWire`（裸连看线上原文：流级 ERROR、载荷字面量 `null`、同连接下一流照常 RESPONSE）、`TestTypedNilErrorClientSeesNormalizedInternal`（应用侧：REQUEST 与 STREAM 两臂都收到 INTERNAL 归一形态且连接存活）。改形方案的隐患已被变异实测反证：守卫若写成 `ok && e != nil`，归一路径会去调 typed-nil 的 `Error()`，nil 解引用当场 panic——单元测试直接炸，端到端只剩 runRequest 的 recover 兜着。现状因此不只是"已文档化"，而是"被钉住"。
 
 ## 8. 边界情况清单
 
