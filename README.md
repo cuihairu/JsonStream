@@ -1,37 +1,27 @@
 # JsonStream
 
-一道面试题的实现：基于 TCP 的自定义 JSON 二进制帧协议，参考 WebSocket 与 RSocket。纯标准库、零第三方依赖，Go ≥ 1.24。协议规范见 [docs/protocol.md](docs/protocol.md)，架构与取舍见 [docs/DESIGN.md](docs/DESIGN.md)，结合实现的知识点梳理见 [docs/NOTES.md](docs/NOTES.md)，协议层的权衡笔记见 [docs/design-notes.md](docs/design-notes.md)。
+<p align="center"><img src="assets/logo.svg" width="110" alt="JsonStream"></p>
 
-## 面试题要求
+[![Go Report Card](https://goreportcard.com/badge/github.com/cuihairu/jsonstream)](https://goreportcard.com/report/github.com/cuihairu/jsonstream)
+[![ci](https://github.com/cuihairu/jsonstream/actions/workflows/ci.yml/badge.svg)](https://github.com/cuihairu/jsonstream/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/cuihairu/jsonstream/branch/main/graph/badge.svg)](https://codecov.io/gh/cuihairu/jsonstream)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cuihairu/jsonstream.svg)](https://pkg.go.dev/github.com/cuihairu/jsonstream)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-题目原文的分组与条目，原样整理：
+一道面试题的衍生实现：基于 TCP 的自定义 JSON 二进制帧协议。纯标准库、零第三方依赖，Go ≥ 1.24。
 
-- **传输可靠性与容错性**
-  - 基于 TCP
-  - 支持断线重连恢复
-  - 支持心跳机制
-- **便捷性**
-  - 以 JSON 为交互数据
-- **高性能**
-  - 二进制帧
-  - 支持参数化是否启用压缩
-- **安全性**
-  - 支持可选是否启用加密
-- **灵活性**
-  - 支持请求/响应模式
-  - 支持发布/订阅模式
-  - 支持流式传输
-  - 支持双工
-  - 支持单向发送，无需返回
-  - 支持返回错误
-  - 支持可选背压
-- **工程要求**
-  - 对应的测试用例
-  - 性能测试
-  - 完整的使用例子
-  - 相关说明文档
+- **协议规范（语言无关，跨语言实现的单一事实源）**：[docs/protocol.md](docs/protocol.md)——只拿到这一份文档就应能写出可互通的其他语言实现；Go 实现已可用（[v0.1.0](https://github.com/cuihairu/jsonstream/releases/tag/v0.1.0)），Python/Rust 等其他语言实现规划中。
+- **题目要求**：[docs/interview-requirements.md](docs/interview-requirements.md)——题面原文分组与逐条实现现状（含分帧三条的如实标注）。
+- **在线文档**：<https://cuihairu.github.io/jsonstream/>（随 main 分支更新）。
+- 架构与取舍 [docs/DESIGN.md](docs/DESIGN.md)、知识点梳理 [docs/NOTES.md](docs/NOTES.md)、协议权衡笔记 [docs/design-notes.md](docs/design-notes.md)、与 WebSocket 的能力对照 [docs/websocket-comparison.md](docs/websocket-comparison.md)、TCP 流特性与市面协议横评 [docs/tcp-and-landscape.md](docs/tcp-and-landscape.md)。
 
 ## 设计与知识点
+
+本节讲协议设计的逐点依据：帧格式、交互模型、元数据分离、心跳、断线恢复、压缩加密、背压、pub/sub 混用与实测教训。与 WebSocket 的能力对照，摘成三行——
+
+- WS 有、本协议没有或显式不做：分片传输、浏览器原生可达、TLS 一等承载与 443 复用、子协议/扩展协商、文本/二进制 opcode 区分（客户端 Masking 则明确不需要——raw TCP 直连没有那个威胁模型）。
+- WS 标准没有、本协议内建：请求/响应、发布/订阅、流式、credit 背压、断线恢复、Stream ID 多路复用——这些在 WS 应用里都要自造。
+- 逐条依据（协议章节与代码位置）见 [docs/websocket-comparison.md](docs/websocket-comparison.md)；更宽的协议横评见 [docs/tcp-and-landscape.md](docs/tcp-and-landscape.md)。
 
 ### 帧格式：定长头 + 长度前缀，对着 WebSocket 抄作业再还回去一点
 
@@ -171,8 +161,8 @@ Stream ID 按发起方分奇偶（客户端奇数、服务端偶数），和 HTT
 以下命令可直接复制执行（Go ≥ 1.24，无第三方依赖）：
 
 ```bash
-git clone https://github.com/cuihairu/JsonStream.git
-cd JsonStream
+git clone https://github.com/cuihairu/jsonstream.git
+cd jsonstream
 
 # 构建 + 全量测试 + 静态检查
 go build ./...
@@ -201,6 +191,12 @@ go run ./examples/server
 go run ./examples/client
 ```
 
+引入（Go ≥ 1.24，零第三方依赖）：
+
+```bash
+go get github.com/cuihairu/jsonstream
+```
+
 客户端最小用法（完整 API 见 examples）：
 
 ```go
@@ -212,7 +208,7 @@ sub, _ := c.Subscribe(ctx, "ticks", func(m *jsonstream.Message) error { return n
 _ = c.Publish(ctx, "metrics", v) // client → server
 ```
 
-发起类 API 一律以 `ctx` 打头：`SendOneWay`/`Publish`（Client 与 Server 两侧）与 `Request`/`Stream`/`Channel` 同规，ctx 约束「等可用连接」与「等发送入队」两段等待（DESIGN §8.4）。仓库未发版（无 tag），该参数是就地破坏性变更，不为旧签名留别名——旧行为等价于传 `context.Background()`。
+发起类 API 一律以 `ctx` 打头：`SendOneWay`/`Publish`（Client 与 Server 两侧）与 `Request`/`Stream`/`Channel` 同规，ctx 约束「等可用连接」与「等发送入队」两段等待（DESIGN §8.4）。该签名在首发（v0.1.0）前定版，不为旧签名留别名——旧行为等价于传 `context.Background()`。
 
 压缩/加密/背压都是参数化开关，握手协商后生效（双方都开才启用）：
 
@@ -223,3 +219,11 @@ cfg.Encrypt = true  // AES-256-GCM，先压后加
 cfg.Key = key32     // 32 字节预共享密钥
 cfg.Credit = 64     // 连接级信用窗口，生效值取双方最小
 ```
+
+## 仓库布局与多语言规划
+
+本仓库规划未来实现其他语言版本（Python/Rust/Java 等），布局按此定位：
+
+- **Go 实现保持仓库根**（`go.mod` 在根目录，Go 生态标准布局）。不会把 Go 代码挪进子目录——module path 变更会破坏所有现有 import。
+- **未来其他语言实现以平级子目录进入**（`python/`、`rust/`…），互不干扰。
+- **协调中枢是语言无关的协议规范**：[docs/protocol.md](docs/protocol.md) 是所有实现的单一事实源，任何语言的实现互通性以它为准；实现细节文档（DESIGN/NOTES 等）描述的是 Go 参考实现，不构成跨语言契约。
