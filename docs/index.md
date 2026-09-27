@@ -11,15 +11,20 @@ hero:
   actions:
     - theme: brand
       text: 快速开始
-      link: "#快速开始"
+      link: /getting-started
     - theme: alt
       text: 协议规范（单一事实源）
       link: /protocol
     - theme: alt
-      text: 题目要求
-      link: /interview-requirements
+      text: API 参考
+      link: /api
 
 features:
+  - icon: 🚀
+    title: 上手指南
+    details: 从 go get 到五种交互模式跑通一遍：请求/响应、流式、双工、单向、发布/订阅，全部对照真实 API，可直接运行。
+    link: /getting-started
+    linkText: 开始使用
   - icon: 📋
     title: 面试题要求
     details: 题面原文原样分组归档，逐条对照实现现状——完成即标注依据，取舍即说明理由，不夸大。
@@ -30,6 +35,11 @@ features:
     details: 语言无关的单一事实源：帧格式逐字段、握手协商、交互原语、错误码表、变换管线、背压与恢复——只拿到这一份文档就应能写出可互通的实现。
     link: /protocol
     linkText: 阅读规范
+  - icon: 📚
+    title: API 参考
+    details: Go 参考实现的全部公开 API：入口、五种交互的发起与响应端、Config 逐字段默认值、帧层与错误码表。
+    link: /api
+    linkText: 查阅 API
   - icon: 🔄
     title: 与 WebSocket 对照
     details: WS 有我们没有的（分片、浏览器可达、TLS 承载），WS 没有我们内建的（req/res、pub/sub、背压、恢复）——每条附代码与文档依据。
@@ -77,4 +87,4 @@ cfg.Key = key32     // 32 字节预共享密钥
 cfg.Credit = 64     // 连接级信用窗口，生效值取双方最小
 ```
 
-库与协议的全貌：架构与取舍见 [DESIGN.md](/DESIGN)，协议逐字段定义见 [protocol.md](/protocol)，与 WebSocket 的能力边界见 [websocket-comparison.md](/websocket-comparison)。
+库与协议的全貌：上手与五种模式见 [getting-started.md](/getting-started)，全部公开 API 见 [api.md](/api)，架构与取舍见 [DESIGN.md](/DESIGN)，协议逐字段定义见 [protocol.md](/protocol)，与 WebSocket 的能力边界见 [websocket-comparison.md](/websocket-comparison)。

@@ -24,11 +24,20 @@ export default defineConfig({
     siteTitle: "JsonStream",
     logo: "/logo.svg",
     nav: [
-      { text: "文档", link: "/protocol" },
+      { text: "上手指南", link: "/getting-started" },
+      { text: "API 参考", link: "/api" },
+      { text: "协议规范", link: "/protocol" },
       { text: "题目要求", link: "/interview-requirements" },
     ],
     sidebar: {
       "/": [
+        {
+          text: "上手",
+          items: [
+            { text: "上手指南", link: "/getting-started" },
+            { text: "API 参考", link: "/api" },
+          ],
+        },
         {
           text: "项目背景",
           items: [
