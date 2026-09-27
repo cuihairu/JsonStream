@@ -31,3 +31,8 @@
 *.exe
 *.out
 *.app
+
+# Node / VitePress（在线文档站的依赖与构建产物）
+node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/

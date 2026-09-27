@@ -1,0 +1,59 @@
+# VitePress 文档站构建 + 部署 GitHub Pages（Pages 需以 "GitHub Actions" 为源，
+# 有 upload + deploy 两步产物才会真正发布，缺 deploy 步骤线上永远停在旧产物）。
+name: pages
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write # deploy-pages 发布到 GitHub Pages
+  id-token: write # Pages OIDC 鉴权
+
+# 部署串行：不打断进行中的部署（打断会留下半套产物）
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      # VitePress build 自带死链检查：docs 内相对链接指到不存在的页面会直接失败，
+      # 这一步同时是文档链接的 CI 门禁。
+      - name: Build site
+        run: pnpm build
+      # PR 只校验不部署：产物留给 push main 的部署 job
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/.vitepress/dist
+
+  deploy:
+    # 只有 push main / 手动触发才真正发布
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

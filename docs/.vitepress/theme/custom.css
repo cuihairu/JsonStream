@@ -1,0 +1,127 @@
+/*
+ * JsonStream docs theme —— Mintlify 风格定制（结构承 falcon 的 VitePress 主题改造）
+ * × JsonStream brand：logo 链环橙 #e16531（assets/logo.svg，1024 viewBox）
+ *   亮色正文链接用加深一档的 #c1521f 保可读对比；暗色直接用提亮的 #f4a26b。
+ *
+ * Mintlify 关键特征落地：
+ *  - 白底 + 5% 黑度边框分隔（不靠阴影/灰底）
+ *  - feature 卡片 16px 圆角、icon 用 brand-soft 底
+ *  - 按钮全 pill（9999px）——Mintlify 签名形状
+ *  - 标题紧字距（display 级 -0.8px）、正文 170% 行高
+ *  - brand 色只用于 CTA/hover/focus，不做大面积填充
+ */
+
+:root {
+  /* ---- brand：链环橙 ---- */
+  --vp-c-brand-1: #c1521f;
+  --vp-c-brand-2: #e16531;
+  --vp-c-brand-3: #a63f13;
+  --vp-c-brand-soft: rgba(225, 101, 49, 0.14);
+
+  --vp-button-brand-bg: #e16531;
+  --vp-button-brand-hover-bg: #c1521f;
+  --vp-button-brand-active-bg: #a63f13;
+  --vp-button-brand-border: transparent;
+
+  /* hero：名字渐变（深橙→链环橙→浅橙）+ 大气渐变底（Mintlify atmospheric wash） */
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(115deg, #a63f13 8%, #e16531 52%, #f4a26b 96%);
+  --vp-home-hero-image-background: linear-gradient(135deg, rgba(225, 101, 49, 0.26) 0%, rgba(244, 162, 107, 0.1) 45%, rgba(255, 255, 255, 0) 80%);
+  --vp-home-hero-image-filter: blur(56px);
+
+  --vp-custom-outline: #e16531;
+  --vp-c-brand-inverse: #ffffff;
+
+  /* Mintlify：分隔线用 5% 黑度（亮色） */
+  --vp-c-divider: rgba(0, 0, 0, 0.06);
+  --vp-c-gutter: rgba(0, 0, 0, 0.05);
+}
+
+.dark {
+  /* 暗色：brand 用提亮的链环橙（暗底可读且与 logo 同源） */
+  --vp-c-brand-1: #f4a26b;
+  --vp-c-brand-2: #ef8b55;
+  --vp-c-brand-3: #f7b98c;
+  --vp-c-brand-soft: rgba(244, 162, 107, 0.16);
+
+  --vp-button-brand-bg: #d95a28;
+  --vp-button-brand-hover-bg: #e16531;
+  --vp-button-brand-active-bg: #f4a26b;
+
+  --vp-home-hero-name-background: linear-gradient(115deg, #f7b98c 8%, #f4a26b 52%, #fcd9bd 96%);
+  --vp-home-hero-image-background: linear-gradient(135deg, rgba(225, 101, 49, 0.22) 0%, rgba(244, 162, 107, 0.08) 45%, rgba(0, 0, 0, 0) 80%);
+
+  --vp-custom-outline: #f4a26b;
+
+  /* Mintlify 暗色：白 8% 分隔 */
+  --vp-c-divider: rgba(255, 255, 255, 0.08);
+  --vp-c-gutter: rgba(255, 255, 255, 0.06);
+}
+
+/* ---- feature 卡片（Mintlify：16px 圆角 + 5% 边框 + brand-soft icon 底） ---- */
+.VPFeature {
+  border-radius: 16px;
+  border: 1px solid var(--vp-c-divider);
+  transition: border-color 0.25s;
+}
+.VPFeature:hover {
+  border-color: rgba(225, 101, 49, 0.35);
+}
+.dark .VPFeature:hover {
+  border-color: rgba(244, 162, 107, 0.35);
+}
+.VPFeature .icon {
+  border-radius: 16px;
+  background-color: var(--vp-c-brand-soft);
+  color: var(--vp-c-brand-1);
+}
+
+/* ---- 按钮：Mintlify 全 pill 签名形状 ---- */
+.VPButton {
+  border-radius: 9999px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+/* ---- 标题紧字距（Mintlify display tracking） ---- */
+.vp-doc h1,
+.vp-doc h2,
+.VPDoc h1,
+.VPDoc h2 {
+  letter-spacing: -0.6px;
+}
+.vp-doc h1 {
+  letter-spacing: -0.8px;
+}
+
+/* ---- 正文阅读舒适度（Mintlify 150% 行高起步，中文取 1.7） ---- */
+.vp-doc p,
+.vp-doc li {
+  line-height: 1.7;
+}
+
+/* ---- inline code：小圆角 + 淡底（Mintlify radius scale 4px） ---- */
+.vp-doc code {
+  border-radius: 4px;
+}
+
+/* ---- 代码块顶部薄 brand 线提示（brand 只做点缀不做填充） ---- */
+.vp-code-group .vp-code-group-tabs,
+.vp-doc div[class*="language-"]::after {
+  border-radius: 16px;
+}
+
+/* ---- 链接 hover 用 brand（Mintlify: link hover = brand） ---- */
+.vp-doc a {
+  text-decoration-color: rgba(225, 101, 49, 0.4);
+}
+.vp-doc a:hover {
+  color: var(--vp-c-brand-1);
+  text-decoration-color: var(--vp-c-brand-1);
+}
+
+/* ---- outline / sidebar 当前项：brand 指示 ---- */
+.VPDocOutlineItem .outline-link.level-2:hover,
+.VPDocOutlineItem .outline-link.level-3:hover {
+  color: var(--vp-c-brand-1);
+}
