@@ -139,7 +139,7 @@ if f.Flags&FlagHasMeta != 0 { io.ReadFull(r, ml[:]) }   // ② 变长段
 io.ReadFull(r, f.Metadata) / io.ReadFull(r, f.Payload)  // ③ 变长段
 ```
 
-三个设计点值得单独说：
+三个设计点：
 
 - 头是栈数组而不是 `make([]byte, 14)`：`ReadFrame` 在繁忙连接上每秒可能被调用上万次，14B 的堆分配会被 size class 放大并增加 GC 扫描成本。栈数组让它彻底消失——这也是基准里 64B 载荷的帧往返也只有 6 allocs/op 的原因之一。
 - 先校验、后分配：`payloadLen` 的上限判断（frame.go:191）在 `make([]byte, payloadLen)` 之前。顺序反了就是"先按对端报的长度申请内存、再判断合不合法"，等于把 OOM 开关交给对端——这是协议实现最常见也最致命的一类错误。
@@ -158,7 +158,7 @@ io.ReadFull(r, f.Metadata) / io.ReadFull(r, f.Payload)  // ③ 变长段
 
 关键取舍：缓冲深度 32 是"未启用背压时的兜底"，不是"设计出来的窗口"。启用 credit 时在途条数被 credit 窗口（通常 ≪ 32）约束，缓冲根本积压；未启用时缓冲写满会让 `deliver` 阻塞读循环，反压一路传导到 TCP 接收窗口——也就是"关闭背压 = 信任 TCP 兜底"的字面含义。备选是"缓冲深度与 credit 窗口联动"：那要让 flow 感知协商结果，而 flow 的构造在 `newFlow` 里、协商结果在 endpoint 上，多一层耦合换来的只是省几个槽位，不值。
 
-另一处非显然的取舍：`frames` 存指针不存值。一帧载荷最大 16MiB，复制进通道意味着每个中转点都付一次 L 的拷贝；存指针则"谁投递谁负责生命周期"。代价是帧的内存所有权变得微妙——保留队列直接持引用（§5.5）而不深拷贝，前提是栈内没有任何代码修改 `Frame` 的字段。这条不变式没有类型系统保护（`Frame` 是可变的结构体），它靠注释和 code review 维持；真正的保险是"编码发生在写循环、编码后不再有人碰那个 `Frame`"这一时序事实。
+`frames` 存指针不存值。一帧载荷最大 16MiB，复制进通道意味着每个中转点都付一次 L 的拷贝；存指针则"谁投递谁负责生命周期"。代价是帧的内存所有权变得微妙——保留队列直接持引用（§5.5）而不深拷贝，前提是栈内没有任何代码修改 `Frame` 的字段。这条不变式没有类型系统保护（`Frame` 是可变的结构体），它靠注释和 code review 维持；依据是"编码发生在写循环、编码后不再有人碰那个 `Frame`"这一时序事实。
 
 ### 4.3 应用层：延迟解码——本实现对"流式 vs DOM"的取舍
 
@@ -170,11 +170,11 @@ io.ReadFull(r, f.Metadata) / io.ReadFull(r, f.Payload)  // ③ 变长段
 
 这条不变式是 §5.1 的"栈内恒明文"在 JSON 层的延伸：协议栈的任何一层都不假设 payload 的形状。收益不只是性能，还有正确性——`RawMessage` 保留原始字节，转发/重放不会引入浮点精度漂移（`1e400`、`9007199254740993` 这类值过一遍 `float64` 就变了）。
 
-这条取舍的反面：`Decode(v)` 是"要么全解、要么失败"的原子操作，无法只取对象里的一个字段。NDJSON 式"一帧一个巨大数组、只关心前几项"的场景，这里只能整体解——真要支持就得把 `Decode` 换成 `json.Decoder` 的游标式读取，那是一条明确但要付"读过头"与"状态机"代价的路（NOTES.md §2 展开这条路的两难）。
+`Decode(v)` 是"要么全解、要么失败"的原子操作，无法只取对象里的一个字段。NDJSON 式"一帧一个巨大数组、只关心前几项"的场景，这里只能整体解——真要支持就得把 `Decode` 换成 `json.Decoder` 的游标式读取，那是一条明确但要付"读过头"与"状态机"代价的路（NOTES.md §2 展开这条路的两难）。
 
 ### 4.4 "读过头"问题：握手与传输层共享同一个 bufio.Reader
 
-流式解析里最阴的一类 bug 是读过头：解析器为了填满自己的缓冲，把下一条消息的开头也读走了，而上层以为消息之间有干净的边界。JSON 有 `Decoder.Buffered()` 专门暴露这个"多读的余量"；本项目在帧层面对同样的问题，解法是让两个阶段共享同一个 reader 对象，而不是各自新建：
+流式解析里的一类阴险 bug 是读过头：解析器为了填满自己的缓冲，把下一条消息的开头也读走了，而上层以为消息之间有干净的边界。JSON 有 `Decoder.Buffered()` 专门暴露这个"多读的余量"；本项目在帧层面对同样的问题，解法是让两个阶段共享同一个 reader 对象，而不是各自新建：
 
 ```go
 br := bufio.NewReader(nc)          // 握手阶段
@@ -184,7 +184,7 @@ tr := newTransport(nc, br, …)      // ← 关键：把 br 本身交给 transpo
 
 `transport` 因此有一个类型是 `io.Reader` 而不是 `*bufio.Reader` 的字段（transport.go:17，注释写明"与握手阶段共享的 bufio，避免缓冲数据丢失"）。如果这里写成 `bufio.NewReaderSize(conn, …)`（`readLoop` 里确实又包了一层，见 transport.go:175），第二层 bufio 会从 conn 重新取字节，而握手阶段的 br 缓冲里那几字节就被永久跳过——表现为"偶发丢第一帧"，且只在 CONNACK 与首个数据帧同批到达时出现，极难复现。
 
-注意 `readLoop` 里那层 `bufio.NewReaderSize` 之所以安全，是因为它包的是 `t.reader`（那个共享的 br）而不是 `conn`：多一层缓冲只多一次内存拷贝，不会跨阶段抢字节。这个"看起来像冗余、实际是兜底"的写法值得在 code review 里明确说明，否则下一个人会"顺手优化掉"它。
+注意 `readLoop` 里那层 `bufio.NewReaderSize` 之所以安全，是因为它包的是 `t.reader`（那个共享的 br）而不是 `conn`：多一层缓冲只多一次内存拷贝，不会跨阶段抢字节。这个"看起来像冗余、实际是兜底"的写法在 code review 里要明确说明，否则下一个人会"顺手优化掉"它。
 
 ## 5. 关键数据结构
 
@@ -220,7 +220,7 @@ type flow struct {
 
 一个结构同时表示"我发起的流"与"我在响应的流"——差异只在 kind 与谁持有 frames 的读取端。备选是 initiator/responder 两个结构：放弃，因为双工通道（Channel）本质上同时是两者，拆开会让 Channel 持有两个半流对象，状态同步（对端 CANCEL 时两边都要终结）立刻变复杂。
 
-终结语义收敛为一个原语：`finish(e)` 在锁内写 done/err、`close(doneCh)`、注销流表，幂等。所有等待方（Next/Receive/Request 的 select、streamContext.Done）监听 doneCh。err 必须在锁内读（`doneState`）——曾因 `Err()` 裸读与读循环 finish 写竞争被 CI race 实锤（README bug 清单外的一条修复），此后统一收口。
+终结语义收敛为一个原语：`finish(e)` 在锁内写 done/err、`close(doneCh)`、注销流表，幂等。所有等待方（Next/Receive/Request 的 select、streamContext.Done）监听 doneCh。err 必须在锁内读（`doneState`）——曾因 `Err()` 裸读与读循环 finish 写竞争被 CI race 捕获（README bug 清单外的一条修复），此后统一收口。
 
 ### 5.3 endpoint（endpoint.go:12）——流调度核心
 
@@ -337,8 +337,8 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 | 一条连接上多帧粘包 | bufio 缓冲 + ReadFull 精确取长 | frame.go:170, transport.go:175 | 缓冲解决 syscall 次数，ReadFull 解决取字节数 |
 | 坏魔数 / 版本不符 / 保留位非零 | Malformed → 断连 | frame.go:173/184/187 | 保留位非零意味着"我们不知道对端在用什么扩展语义"，猜错比断开糟 |
 | `payloadLen` 超过 16MiB | Malformed，**在 `make` 之前** | frame.go:191 | 顺序即安全：先分配后校验 = 把 OOM 开关交给对端 |
-| `metaLen` 恰为 64KiB | 编码端拒（上限 = `math.MaxUint16`） | frame.go:34/134 | 上界必须等于字段可表达的真值，65536 无法用 uint16 表达（gosec 实锤的 off-by-one） |
-| `FlagHasMeta` 置位但元数据为空 | 仍写出 metaLen 段（长度 0） | frame.go:150 | 保证 parse∘encode = id：否则"声称有 meta 却不带段"的自相矛盾帧（fuzz 实锤） |
+| `metaLen` 恰为 64KiB | 编码端拒（上限 = `math.MaxUint16`） | frame.go:34/134 | 上界必须等于字段可表达的真值，65536 无法用 uint16 表达（gosec 捕获的 off-by-one） |
+| `FlagHasMeta` 置位但元数据为空 | 仍写出 metaLen 段（长度 0） | frame.go:150 | 保证 parse∘encode = id：否则"声称有 meta 却不带段"的自相矛盾帧（fuzz 捕获） |
 | 载荷恰好 0 字节 | `Payload` 保持 nil，不分配 | frame.go:207 | 0 长度帧合法（心跳/控制帧）；`make([]byte, 0)` 会返回非 nil 空切片，破坏判等 |
 | 未知帧类型 | PROTOCOL → 断连且**不回帧** | endpoint.go:219 | 连类型都不认识说明对端是异版本实现，回帧的互通前提已不成立 |
 | 握手期恶意慢连接 | 整体 deadline = DialTimeout | server.go:226 | 不给握手期读设上限，一个连上不发字节的连接就能占住一个 goroutine |
@@ -418,7 +418,7 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 | 保留队列 | 1/会话 | ≤ `RetentionBytes`（4MiB） | 字节记账，超限降级 |
 | 单帧载荷 | — | ≤ 16MiB | 硬上限，分配前校验 |
 
-16MiB 上限约束的是"单帧"，不是"总量"。未启用 credit 时，内存的真实上界是 `32 × N × 平均帧长`——一个 N=1000、平均帧 1MiB 的连接可以合法地吃掉 32GiB。真正的总量约束由三样东西提供，缺一不可：
+16MiB 上限约束的是"单帧"，不是"总量"。未启用 credit 时，内存的真实上界是 `32 × N × 平均帧长`——一个 N=1000、平均帧 1MiB 的连接可以合法地吃掉 32GiB。总量约束由三样东西提供，缺一不可：
 
 1. credit 窗口（可选，默认关）：把在途条数钉在 W 以内；
 2. 32 深的通道缓冲：写满后读循环阻塞，反压传导到 TCP 接收窗口；
@@ -453,7 +453,7 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 - D4 kill 单点收尾 + dead channel 广播。备选：各处自查 conn 状态——放弃，竞态窗口遍布；sync.Once + close(chan) 是 Go 里"一次性广播"的最简正解。
 - D5 被动流注册同步、handler 执行异步（endpoint.go:205 注释）。`prepareRequest` 在 readLoop 的同步路径完成路由查找/校验/注册，`runRequest` 才进 goroutine。备选：全异步（注册也在 goroutine 里）——放弃，对端发起 Channel 后会立即发数据帧，注册晚于数据帧到达时 lookupFlow miss，帧被静默丢弃，双方死等（实测会发生的互锁）。同步注册的代价是 readLoop 被路由表查找（RLock）短暂占用，可忽略。
 - D6 flow 终结 = close(doneCh) 单原语。备选：状态枚举 + 轮询——放弃，close 的广播语义让所有等待方一次感知，且 streamContext 直接把 doneCh 包装成 context.Context，handler 的 ctx 取消免费获得。
-- D7 出站一律经当前 endpoint（flow.currentEP()）。备选：流持有构造时的 endpoint——被 bug 9-6 实锤放弃：重连后 CANCEL/UNSUBSCRIBE 发给死连接被静默吞掉，对端 handler 永远收不到取消。`currentEP()` 的锁开销换消灭一整类陈旧引用 bug。
+- D7 出站一律经当前 endpoint（flow.currentEP()）。备选：流持有构造时的 endpoint——被 bug 9-6 捕获放弃：重连后 CANCEL/UNSUBSCRIBE 发给死连接被静默吞掉，对端 handler 永远收不到取消。`currentEP()` 的锁开销换消灭一整类陈旧引用 bug。
 - D8 Stream ID 奇偶 + 跨重连单调。奇偶（HTTP/2 同思路）让新到帧无需协商即可判归属；`bindSession` 把 `oldEp.nextID` 过继给新端点（client.go:379）——重置会让新流与迁移流撞号，旧连接迟到的 COMPLETE 误杀新流（bug 9-5）。
 - D9 会话保留 per-session 内存队列 + 字节上限 + 溢出降级。备选：写磁盘/外部 broker（题面外）、无上限（OOM 开关）、溢出即断会话（过于激进——降级为"失去恢复资格但连接可用"既防 OOM 又不惩罚已建立的连接）。
 - D10 心跳由写循环注入、死活由读 deadline 判定。写侧 ticker 到期发 PING，读侧每帧重置 `SetReadDeadline(1.5×间隔)`。备选：TCP keepalive（探不到对端进程死锁/GC 停顿——它测的是内核协议栈）；读侧主动探测（会把心跳职责和读职责搅在一起）。1.5× 是容忍一次丢帧抖动与判死速度的折中。
@@ -507,7 +507,7 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 | `examples/client` `Publish` | 连接在 `SendOneWay` 已成功、`Publish` 之前死掉 | **确定性·钩子 + 正面证据锚定**：唯一实证为纯时序抓不住的分支——掐线锚在 chat ack 回包后的 δ 空转，扫 δ∈{0…480µs} 共 90 轮，无一轮出现"判死报错且 ONEWAY 在线上"（判死链路与主 goroutine 剩余链条赛跑：赢则连上一出口一起死，输则两出口全过）。改用示例侧 `beforePublish` 钩子掐线后，又暴露第二条隐蔽赛跑：写循环把迟到 ONEWAY 推上线与 kill 关 socket 并发，-race 实测约 1/8 轮帧被吞。终版把掐线锚定在对端**收到** ONEWAY 之后并向钩子确认，钩子等确认再加 20ms 传播余量——链条里没有未锚定的赛跑 |
 | `examples/server` `chat` 的 `ch.Send` | `Send` 阻塞在连接级信用闸门、被 CANCEL 解锁 | **确定性·裸连接抽干窗口**：raw TCP 声明 credit=2 且永不回授 CREDIT，生效窗口 min(64, 2)=2；range 两帧上线（线上观测确认——credit 在 take 时扣）后窗口归零、第三条 Emit 永挂；chat 消息使 `ch.Send` 的 take 排进空窗口，CANCEL 关闭该流 ctx → take 返回 CANCELLED → `return err` → 框架的 ERROR(sid=3, code=5) 被裸连接读回。全链正面证据，示例代码零改动 |
 
-三条教训值得单独记："覆盖不到"要先实证再采信——旧版把 Publish 分支归为"窗口微秒级、概率事件"却没量化过；90 轮扫描给出的不是"难"而是"恒不可观测"，正是这个实证把一次小的形状变更（带注释、演示路径恒 nil 的检查点钩子）从"破坏示例"变成"值得付的代价"。硬币可以做得很厚——窄窗竞态的漏检来自"到达时刻 vs 窗口"的固定偏置，单次探测赢不了就把到达序列铺满窗口两侧（盲发连发 + `lookupFlow` 对未注册流的静默忽略 = 免费的轮次），偏置消失而判据不变。掐线的锚点要选在已上线的帧上——凡"测试侧观察→行动"的时序，观察对象必须是已经发生的正面证据（收到的帧），不是"应该已经发生"的本地时刻。
+三条教训："覆盖不到"要先实证再采信——旧版把 Publish 分支归为"窗口微秒级、概率事件"却没量化过；90 轮扫描给出的不是"难"而是"恒不可观测"，正是这个实证把一次小的形状变更（带注释、演示路径恒 nil 的检查点钩子）从"破坏示例"变成"值得付的代价"。硬币可以做得很厚——窄窗竞态的漏检来自"到达时刻 vs 窗口"的固定偏置，单次探测赢不了就把到达序列铺满窗口两侧（盲发连发 + `lookupFlow` 对未注册流的静默忽略 = 免费的轮次），偏置消失而判据不变。掐线的锚点要选在已上线的帧上——凡"测试侧观察→行动"的时序，观察对象必须是已经发生的正面证据（收到的帧），不是"应该已经发生"的本地时刻。
 
 原有判断保留但范围收窄：为覆盖率给示例加 sleep、加测试专用分支、把双工 handler 改写成一次性收发的形态，依然不做。`beforePublish` 是唯一例外，按"读起来像正常工程代码"的标准写（配置结构体上的函数字段、注释说明存在理由），与 `runOptions.callTTL` 同源。库包等价分支另有确定性契约测试（`TestOneWayPublishCtxContracts` 等），示例测试不复重库语义，只证明示例脚本自身会走到这些 return。
 

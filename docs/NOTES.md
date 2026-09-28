@@ -84,7 +84,7 @@ number = [ "-" ] int [ frac ] [ exp ]   int = "0" / (1-9 *DIGIT)
 | 只要对象里的一个字段 | 流式（token + `More()`） | DOM 必须整棵建起来 |
 | 消息边界已由外层协议给出 | 延迟解码 | 见下 |
 
-最后一行是本项目的情形，值得展开。
+最后一行是本项目的情形，展开如下。
 
 ### 2.3 本项目为什么是"帧级流式 + 载荷延迟解码"
 
@@ -284,7 +284,7 @@ tr := newTransport(nc, br, …)   // ← 传的是 br 本身
 | --- | --- | --- |
 | **`select` 多就绪时随机选** | 公平性设计，但在错误路径上 = 不确定性 | `transport.send` 先对 `dead` 做非阻塞预检（transport.go:93）；消费端在 `doneCh` 分支先排空 `frames`（flow.go:181）。两条都是 CI race/实测逼出来的（NOTES §8） |
 | **typed-nil 装进 error 接口** | `var e *Error; return e` 的 `err != nil` 为真，调用方一解引用就 panic | `asStreamError` 用类型断言，nil `*Error` 会让错误帧载荷变成 `null`，对端归一为 INTERNAL——**降级而非崩溃**（DESIGN.md §7 末条记录了这个已知盲区） |
-| **整数转换静默截断** | `uint16(65536)` = 0，凭空造出一个"长度为 0"的错帧 | `MaxMetadataSize = math.MaxUint16`（不是 64KiB），编码侧用 `min(len, Max)` 把边界显式化（frame.go:34/153）。gosec 实锤的 off-by-one |
+| **整数转换静默截断** | `uint16(65536)` = 0，凭空造出一个"长度为 0"的错帧 | `MaxMetadataSize = math.MaxUint16`（不是 64KiB），编码侧用 `min(len, Max)` 把边界显式化（frame.go:34/153）。gosec 捕获的 off-by-one |
 | **切片别名** | `append` 复用底层数组会改到别人持有的切片 | `appendTo(dst)` 只追加不改已有内容；写循环用 `buf[:0]` 复用，**前提是不有人持有 buf 的切片** |
 | **`[]byte` 不能做 map 键** | 切片不可比较 | 路由名/主题名一律 `string`：Metadata 解码出来就是 string，且 map 查找需要可比、可作键 |
 | **map 迭代顺序随机** | 遍历结果每次都不同 | `Server.Sessions()` 显式 `sort.Strings`（对外可预期）；`Server.Publish` 遍历顺序无关紧要，故不排 |
@@ -298,7 +298,7 @@ tr := newTransport(nc, br, …)   // ← 传的是 br 本身
 
 | 陷阱 | 现象 | 本仓库 |
 | --- | --- | --- |
-| **数据竞争 = 无 happens-before，与墙钟无关** | `sleep` 治不好竞态，只有 channel / `go` / 锁能建立边 | `flow.err` 的所有读取收口到 `doneState()`（flow.go:124）：裸读与 `finish` 的写竞争，race detector 实锤 |
+| **数据竞争 = 无 happens-before，与墙钟无关** | `sleep` 治不好竞态，只有 channel / `go` / 锁能建立边 | `flow.err` 的所有读取收口到 `doneState()`（flow.go:124）：裸读与 `finish` 的写竞争，race detector 捕获 |
 | **RWMutex 不可升级** | 持读锁时申请写锁 → 死锁 | 全部按"锁外取快照、锁内只改数据"写：`Server.Publish` 先快照 sessions 再逐个取 `ss.mu`（server.go:81-106） |
 | **锁序倒置** | 两把锁交叉获取 → 死锁 | 明确记在 DESIGN.md §6.2：`store.mu → ss.mu` 不嵌套；`ss.mu → ep.streamsMu` 单向；`flow.mu` 锁内不调外部函数 |
 | **channel 提供 happens-before** | 收发本身就是同步边 | 全局的测试接缝（`jsonMarshal` 等）能安全替换，前提是"先写桩再 spawn"（design-notes §9 的顺序约束） |
