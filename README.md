@@ -1,16 +1,18 @@
-# JsonStream
-
 <p align="center"><img src="assets/logo.svg" width="110" alt="JsonStream"></p>
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/cuihairu/jsonstream)](https://goreportcard.com/report/github.com/cuihairu/jsonstream)
-[![ci](https://github.com/cuihairu/jsonstream/actions/workflows/ci.yml/badge.svg)](https://github.com/cuihairu/jsonstream/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/cuihairu/jsonstream/branch/main/graph/badge.svg)](https://codecov.io/gh/cuihairu/jsonstream)
-[![Go Reference](https://pkg.go.dev/badge/github.com/cuihairu/jsonstream.svg)](https://pkg.go.dev/github.com/cuihairu/jsonstream)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+<h1 align="center">JsonStream</h1>
+
+<p align="center">
+  <a href="https://goreportcard.com/report/github.com/cuihairu/jsonstream"><img src="https://goreportcard.com/badge/github.com/cuihairu/jsonstream" alt="Go Report Card"></a>
+  <a href="https://github.com/cuihairu/jsonstream/actions/workflows/ci.yml"><img src="https://github.com/cuihairu/jsonstream/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+  <a href="https://codecov.io/gh/cuihairu/jsonstream"><img src="https://codecov.io/gh/cuihairu/jsonstream/branch/main/graph/badge.svg" alt="codecov"></a>
+  <a href="https://pkg.go.dev/github.com/cuihairu/jsonstream"><img src="https://pkg.go.dev/badge/github.com/cuihairu/jsonstream.svg" alt="Go Reference"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+</p>
 
 基于自定义二进制帧协议承载 JSON 业务数据——一条 TCP 连接多路复用请求/响应、流式、双工、单向与发布/订阅，内建心跳、断线恢复、可选压缩/加密与 credit 背压。纯标准库 Go 参考实现，零第三方依赖；协议规范语言无关，其他语言实现规划中。
 
-- **协议规范（语言无关，跨语言实现的单一事实源）**：[docs/protocol.md](docs/protocol.md)——只拿到这一份文档就应能写出可互通的其他语言实现；Go 实现已可用（`go get github.com/cuihairu/jsonstream`），Python/Rust 等其他语言实现规划中。
+- **协议规范（语言无关，跨语言实现的单一事实源）**：[docs/protocol.md](docs/protocol.md)——只拿到这一份文档就应能写出可互通的其他语言实现；Go 实现已可用（`go get github.com/cuihairu/jsonstream`，[v0.1.0 发布说明](https://github.com/cuihairu/jsonstream/releases/tag/v0.1.0)），Python/Rust 等其他语言实现规划中。
 - **题目要求**：[docs/interview-requirements.md](docs/interview-requirements.md)——题面原文分组与逐条实现现状（含分帧三条的如实标注）。
 - **在线文档**：<https://cuihairu.github.io/jsonstream/>（随 main 分支更新），全部页面的入口导航：
 

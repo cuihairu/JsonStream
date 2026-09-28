@@ -107,7 +107,7 @@ go tool cover -func=coverage.out | tail -1   # 库包语句覆盖须 100%
 
 ## 其他
 
-- **README 里的 v0.1.0 为什么不带 release 链接**：`v0.1.0` tag 目前只打在本地、未推送远端，GitHub 上没有对应的 release 页面（链接会 404）；推 tag / 发 release 不在文档任务域内。待办：推送该 tag 后即可在 README 恢复 release 链接。2026-09-28 全量外链实测中仅此一处死链，已改为纯文字引用。
+- **v0.1.0 的 release 链接**：tag 曾只打在本地、未推远端，GitHub 上没有 release 页面（链接会 404），README 当时改为纯文字引用。2026-09-28 tag 已推送并发布 release，README 已恢复[发布说明链接](https://github.com/cuihairu/jsonstream/releases/tag/v0.1.0)。
 - **为什么改了 README/工作流，CI 的测试结果像没跑过**：见上文 `-count=1` 一节——测试缓存命中时不执行任何测试，这是 Go 缓存语义而非 CI 偷懒。
 - **想跑基准**：CI 只做冒烟（`go test -bench . -benchtime 1x`），本地认真跑用 `go test -bench . -benchmem .`。
 - **发现了 crash 或线上文档问题**：crash 语料按上文 fuzz 一节提交回 `testdata/fuzz/`；文档问题直接改 `docs/` 对应源文件，pages workflow 会随 main 自动发布。
