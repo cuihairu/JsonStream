@@ -1,12 +1,12 @@
 # 与 WebSocket 的能力对照
 
-> 基于**代码事实**的逐条对照：WebSocket（RFC 6455）有、本协议没有（或显式不做）的；WebSocket 标准没有、本协议内建的。每条给出协议文档章节或代码位置依据，不夸大、不遮短。设计动机的完整论证见 [design-notes.md](design-notes.md) §1–§2。
+> 逐条对照以代码为准：WebSocket（RFC 6455）有、本协议没有（或显式不做）的；WebSocket 标准没有、本协议内建的。每条给出协议文档章节或代码位置依据。设计动机的完整论证见 [design-notes.md](design-notes.md) §1–§2。
 
 ## WebSocket 有、JsonStream 没有（或显式不做）
 
 ### ① 分片传输（FIN / continuation，任意大小重组）
 
-WebSocket 用 FIN 位 + continuation opcode 把一条逻辑消息拆成任意多帧，接收端重组（RFC 6455 §5.4）。JsonStream 的对应能力**已定稿、形式不同**：独立 `FRAGMENT` 帧类型（0x10）+ `FlagFragmented` 标志位（[protocol.md](protocol.md) §3.4）——变换后超过单帧上限（16 MiB）的消息自动拆成连续 chunk 运行，重组总量以 `MaxMessageSize`（默认 64 MiB）为帽。与 WebSocket 的差异是形式而非能力：续段不带元数据与变换标志（只随开帧走一次）、运行不可穿插由唯一写循环保证、接收端因此无需块序号；WebSocket 的重组状态机则为浏览器流式解析设计，两者各取所需。**如实标注**：规范已定稿，Go 参考实现的分片代码在落地中——main 分支当前版本对 `FlagFragmented` 帧按保留位违规断开，互通须等实现合入；两次决策（原「不做」与翻案）的理由都留档在 [design-notes.md](design-notes.md) §1.2，逐条现状见 [interview-requirements.md](interview-requirements.md) 的分帧三条。
+WebSocket 用 FIN 位 + continuation opcode 把一条逻辑消息拆成任意多帧，接收端重组（RFC 6455 §5.4）。JsonStream 的对应能力已定稿，形式不同：独立 `FRAGMENT` 帧类型（0x10）+ `FlagFragmented` 标志位（[protocol.md](protocol.md) §3.4）——变换后超过单帧上限（16 MiB）的消息自动拆成连续 chunk 运行，重组总量以 `MaxMessageSize`（默认 64 MiB）为帽。与 WebSocket 的差异是形式而非能力：续段不带元数据与变换标志（只随开帧走一次）、运行不可穿插由唯一写循环保证、接收端因此无需块序号；WebSocket 的重组状态机则为浏览器流式解析设计，两者各取所需。规范与实现分开说：规范已定稿，Go 参考实现的分片代码还在落地中——main 分支当前对 `FlagFragmented` 帧按保留位违规断开，互通要等实现合入。两次决策（原「不做」与翻案）的理由都留档在 [design-notes.md](design-notes.md) §1.2，逐条现状见 [interview-requirements.md](interview-requirements.md) 的分帧三条。
 
 ### ② 浏览器原生可达
 
@@ -14,10 +14,10 @@ WebSocket 用 FIN 位 + continuation opcode 把一条逻辑消息拆成任意多
 
 ### ③ TLS 一等承载与 443/HTTP 栈复用
 
-`wss://` 是 WebSocket 规范内建承载：TLS + HTTP(S) 443 复用 + 代理/防火墙友好。JsonStream 的应用层 AES-256-GCM 定位是"经过中间件仍要保密的端到端段"，明确不替代 TLS（[protocol.md](protocol.md) §10 非目标）。TLS 叠加现状（如实）：
+`wss://` 是 WebSocket 规范内建承载：TLS + HTTP(S) 443 复用 + 代理/防火墙友好。JsonStream 的应用层 AES-256-GCM 定位是"经过中间件仍要保密的端到端段"，明确不替代 TLS（[protocol.md](protocol.md) §10 非目标）。TLS 叠加的现状：
 
-- **服务端开箱可用**：`NewServer(ln net.Listener, cfg)`（server.go:31）直接收 `tls.Listen` 的结果；
-- **客户端缺注入点**：`Dial(ctx, addr, cfg)`（client.go:40）内部裸拨 TCP，公开 API 暂无传入 `net.Conn`（如 `tls.Conn`）的入口——需要库侧补一个连接注入参数。
+- 服务端开箱可用：`NewServer(ln net.Listener, cfg)`（server.go:31）直接收 `tls.Listen` 的结果；
+- 客户端缺注入点：`Dial(ctx, addr, cfg)`（client.go:40）内部裸拨 TCP，公开 API 暂无传入 `net.Conn`（如 `tls.Conn`）的入口——需要库侧补一个连接注入参数。
 
 因此穿透企业代理/防火墙的能力弱于 wss。
 
@@ -31,11 +31,11 @@ WebSocket 用 opcode 区分 text（0x1）/binary（0x2），文本帧附带 UTF-
 
 ### ⑥ 客户端帧 Masking —— 明确不需要
 
-WebSocket 强制客户端→服务端帧掩码，防的是"不可信脚本借浏览器 HTTP 栈发出伪造请求污染中间代理缓存"的历史威胁（RFC 6455 §5.3）。JsonStream 是专用客户端/服务端 raw TCP 直连，链路上不存在共享的 HTTP 缓存中间盒，**威胁模型不存在，掩码明确不做**（[design-notes.md](design-notes.md) §1.2）；恶意输入的防线由 Magic 首字节判废、16 MiB 上限、解压上限承担。
+WebSocket 强制客户端→服务端帧掩码，防的是"不可信脚本借浏览器 HTTP 栈发出伪造请求污染中间代理缓存"的历史威胁（RFC 6455 §5.3）。JsonStream 是专用客户端/服务端 raw TCP 直连，链路上不存在共享的 HTTP 缓存中间盒，威胁模型不存在，掩码明确不做（[design-notes.md](design-notes.md) §1.2）；恶意输入的防线由 Magic 首字节判废、16 MiB 上限、解压上限承担。
 
 ## WebSocket 标准没有、JsonStream 内建
 
-WebSocket 只有"一条连接上的无序消息"，以下六项在 WS 应用里都要**应用层自造约定**；JsonStream 把它们做进协议帧语义：
+WebSocket 只有"一条连接上的无序消息"，以下六项在 WS 应用里都要应用层自造约定；JsonStream 把它们做进了协议帧语义：
 
 | 能力 | WebSocket 生态现状 | JsonStream 机制（依据） |
 | --- | --- | --- |
@@ -48,4 +48,4 @@ WebSocket 只有"一条连接上的无序消息"，以下六项在 WS 应用里�
 
 ## 一句话总结
 
-WebSocket 的核心价值是**可达性**（浏览器、443、代理友好），语义全靠应用层自造；JsonStream 反过来——放弃可达性（raw TCP、无浏览器通道），把交互语义（req/res、pub/sub、流式、背压、恢复）做进协议。两者的能力集合几乎不重叠，详细定位与更多协议的横评见 [tcp-and-landscape.md](tcp-and-landscape.md)。
+WebSocket 的核心价值是可达性（浏览器、443、代理友好），语义全靠应用层自造；JsonStream 反着走，放弃可达性（raw TCP、无浏览器通道），把交互语义（req/res、pub/sub、流式、背压、恢复）做进协议。两者的能力集合几乎不重叠，详细定位与更多协议的横评见 [tcp-and-landscape.md](tcp-and-landscape.md)。

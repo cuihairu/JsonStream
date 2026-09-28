@@ -1,6 +1,6 @@
 # JsonStream 设计文档（架构与取舍）
 
-本文是实现的**架构级**讲解：整体架构、模块划分、数据流与控制流、关键数据结构、并发与错误处理策略，并且每条关键决策都回答"为什么这么设计"——列出考虑过的备选方案与放弃理由。协议层的逐条权衡（帧头字段、交互原语、压缩/加密参数化、背压模型、pub/sub 边界）在 [design-notes.md](design-notes.md) 有更细的展开，本文引用不重复；帧格式的规范定义见 [protocol.md](protocol.md)。
+本文是实现的架构级讲解：整体架构、模块划分、数据流与控制流、关键数据结构、并发与错误处理策略，并且每条关键决策都回答"为什么这么设计"——列出考虑过的备选方案与放弃理由。协议层的逐条权衡（帧头字段、交互原语、压缩/加密参数化、背压模型、pub/sub 边界）在 [design-notes.md](design-notes.md) 有更细的展开，本文引用不重复；帧格式的规范定义见 [protocol.md](protocol.md)。
 
 讲解顺序刻意与面试陈述顺序一致：先给一张全景图，再沿"一帧的旅程"走数据流，然后下钻并发与错误处理，最后是逐条决策清单与实测数据。
 
@@ -8,10 +8,10 @@
 
 面试题要求（README「面试题要求」一节）可归纳为：基于 TCP 的自定义 JSON 帧协议，支持断线重连恢复、心跳、可选压缩/加密，五种交互模式（请求/响应、流式、双工、单向、发布/订阅），可选背压，配套测试与性能数据。翻译成工程目标：
 
-1. **一条 TCP 连接多路复用所有交互模式**——共享握手、心跳与恢复；
-2. **协议栈对应用暴露的 API 心智要小**——Request/Stream/Channel/SendOneWay/Subscribe 五个动词，模式差异藏在协议栈内；
-3. **每个"可选能力"真的是可选**——关闭压缩/加密/背压/恢复时，不该为它们付任何运行时代价；
-4. **对恶意与错误输入有界**——任何对端行为都不能把本端内存打爆或让 goroutine 泄漏。
+1. 一条 TCP 连接多路复用所有交互模式——共享握手、心跳与恢复；
+2. 协议栈对应用暴露的 API 心智要小——Request/Stream/Channel/SendOneWay/Subscribe 五个动词，模式差异藏在协议栈内；
+3. 每个"可选能力"真的是可选——关闭压缩/加密/背压/恢复时，不该为它们付任何运行时代价；
+4. 对恶意与错误输入有界——任何对端行为都不能把本端内存打爆或让 goroutine 泄漏。
 
 非目标（同样重要，写进 protocol.md §10）：变长头、精确一次投递、密钥分发、TLS 替代。分片重组原在非目标清单里，v0.1.x 翻案为正式能力（protocol.md §3.4：独立 FRAGMENT 帧型 + FlagFragmented 位，实现落地中）。
 
@@ -43,7 +43,7 @@
   └────────────────────────────────────────────────────┘
 ```
 
-分层原则只有一条：**每层只认识相邻下层**。`frame.go` 不知道连接的存在（纯 `io.Reader` 进、`*Frame` 出，因此可以单测、可以 fuzz）；`transform.go` 不知道帧头（纯字节进出）；`transport.go` 不知道交互模式（帧进帧出 + 一个分发回调）；`endpoint.go` 不知道 TCP（拿着 transport 的 send/close 接口）；`Client/Server` 是两种装配门面。这个原则的直接收益：14 个源文件里没有任何一处 `net.Conn` 出现在 endpoint 层以上（除 `Server.Serve` 的 accept 与握手）。
+分层原则只有一条：每层只认识相邻下层。`frame.go` 不知道连接的存在（纯 `io.Reader` 进、`*Frame` 出，因此可以单测、可以 fuzz）；`transform.go` 不知道帧头（纯字节进出）；`transport.go` 不知道交互模式（帧进帧出 + 一个分发回调）；`endpoint.go` 不知道 TCP（拿着 transport 的 send/close 接口）；`Client/Server` 是两种装配门面。这个原则的直接收益：14 个源文件里没有任何一处 `net.Conn` 出现在 endpoint 层以上（除 `Server.Serve` 的 accept 与握手）。
 
 ### 2.1 模块划分与职责
 
@@ -88,7 +88,7 @@ Client.Request(ctx, route, v)
                      └─ downSink（服务端）→ tr.send / 会话保留队列
 ```
 
-同步/异步的分界线是**本文件最重要的一条设计**，理由见 §10-D5。
+同步/异步的分界线是本文件最重要的一条设计，理由见 §10-D5。
 
 ### 3.2 下行（服务端 emit → 客户端交付）
 
@@ -111,15 +111,15 @@ writeLoop: sendCh → outbound 变换 → conn.Write
 
 ### 3.3 控制流
 
-- **握手**（CONNECT/CONNACK 恒明文）：双方在写循环启动**之前**用 `rawWrite`/`writeOnce` 同步直写——握手期没有并发写出者，不需要串行化设施；`bufio.Reader` 在握手与 transport 间传递（`transport.reader` 字段），避免缓冲区里已读出的帧丢失。
-- **生效参数**：`effectiveConnack`（handshake.go:51）——compress/encrypt 是与（双方都开才开），credit 取 min（任一方 0 即整体关闭），心跳以服务端为权威，客户端 `bindSession` 用 CONNACK 回写的参数重建 transformer 与 endpoint。
-- **连接死亡**：唯一入口 `transport.kill`（deadOnce 保证单次）：`close(dead)` → 关 credit 闸门 → `conn.Close()` → `go onDead(err)`。所有等待者（send 的 select、takeCredit、connectLoop 的 `<-tr.dead`）通过 dead channel 感知。
-- **重连**（client.go:217 connectLoop）：退避 = 初始值 ×2 至上限，叠加 `0.5+0.5×rand` 抖动（防重连风暴同步化）；断开后先退避一拍再重拨——立即重连常抢在服务端感知断连之前，把本该判「会话过期」的重连误判成 takeover 恢复。
-- **会话保留/恢复**（server.go:395 起）：unbind 启动保留期 timer；重连 `bind` 做 takeover（杀旧连接）→ 迁移奇数流 → 停 timer → 重放 retained；溢出（retainedBytes > 4MiB）则会话失去恢复资格。
+- 握手（CONNECT/CONNACK 恒明文）：双方在写循环启动之前用 `rawWrite`/`writeOnce` 同步直写——握手期没有并发写出者，不需要串行化设施；`bufio.Reader` 在握手与 transport 间传递（`transport.reader` 字段），避免缓冲区里已读出的帧丢失。
+- 生效参数：`effectiveConnack`（handshake.go:51）——compress/encrypt 是与（双方都开才开），credit 取 min（任一方 0 即整体关闭），心跳以服务端为权威，客户端 `bindSession` 用 CONNACK 回写的参数重建 transformer 与 endpoint。
+- 连接死亡：唯一入口 `transport.kill`（deadOnce 保证单次）：`close(dead)` → 关 credit 闸门 → `conn.Close()` → `go onDead(err)`。所有等待者（send 的 select、takeCredit、connectLoop 的 `<-tr.dead`）通过 dead channel 感知。
+- 重连（client.go:217 connectLoop）：退避 = 初始值 ×2 至上限，叠加 `0.5+0.5×rand` 抖动（防重连风暴同步化）；断开后先退避一拍再重拨——立即重连常抢在服务端感知断连之前，把本该判「会话过期」的重连误判成 takeover 恢复。
+- 会话保留/恢复（server.go:395 起）：unbind 启动保留期 timer；重连 `bind` 做 takeover（杀旧连接）→ 迁移奇数流 → 停 timer → 重放 retained；溢出（retainedBytes > 4MiB）则会话失去恢复资格。
 
 ## 4. 流式解析：三个层次的"流"，以及为什么每一层都选了不同的解法
 
-"流式"这个词在本项目里指三件不同的事，它们的共同点是**都不把整体读进内存再处理**，但每层的最优解法不一样。把它们分开讲，是这份实现里最容易被面试官追问、也最容易答混的地方。
+"流式"这个词在本项目里指三件不同的事，它们的共同点是都不把整体读进内存再处理，但每层的最优解法不一样。把它们分开讲，是这份实现里最容易被面试官追问、也最容易答混的地方。
 
 | 层次 | "流"的对象 | 本实现的做法 | 内存特征 |
 | --- | --- | --- | --- |
@@ -129,7 +129,7 @@ writeLoop: sendCh → outbound 变换 → conn.Write
 
 ### 4.1 传输层：定长头把状态机消掉了，于是解析器是"无状态拉取"
 
-TCP 给的是字节流，`ReadFrame`（frame.go:168）要在任意字节偏移上恢复出帧边界。三种分帧手段的取舍已在 protocol.md §3.3 论证过，这里只讲**它对解析器结构的影响**：
+TCP 给的是字节流，`ReadFrame`（frame.go:168）要在任意字节偏移上恢复出帧边界。三种分帧手段的取舍已在 protocol.md §3.3 论证过，这里只讲它对解析器结构的影响：
 
 ```go
 var head [headerSize]byte            // 14B 定长头：栈上数组，零堆分配
@@ -141,13 +141,13 @@ io.ReadFull(r, f.Metadata) / io.ReadFull(r, f.Payload)  // ③ 变长段
 
 三个设计点值得单独说：
 
-- **头是栈数组而不是 `make([]byte, 14)`**：`ReadFrame` 在繁忙连接上每秒可能被调用上万次，14B 的堆分配会被 size class 放大并增加 GC 扫描成本。栈数组让它彻底消失——这也是基准里 64B 载荷的帧往返也只有 6 allocs/op 的原因之一。
-- **先校验、后分配**：`payloadLen` 的上限判断（frame.go:191）在 `make([]byte, payloadLen)` **之前**。顺序反了就是"先按对端报的长度申请内存、再判断合不合法"，等于把 OOM 开关交给对端——这是协议实现最常见也最致命的一类错误。
-- **`io.ReadFull` 而不是 `Read` + 循环**：`ReadFull` 的契约就是"读满 n 字节或出错"，半包在它内部被循环消化。`bufio` 解决的是另一个问题（减少 syscall 次数），两者不可互相替代：没有 bufio，一个带元数据的帧要走 4 次 `read(2)`（头/metaLen/元数据/载荷各一次，ReadFull 内部还可能再循环）；没有 ReadFull，`Read` 只保证"读到至少 1 字节"，一次拿到半个帧头就会把状态读乱。
+- 头是栈数组而不是 `make([]byte, 14)`：`ReadFrame` 在繁忙连接上每秒可能被调用上万次，14B 的堆分配会被 size class 放大并增加 GC 扫描成本。栈数组让它彻底消失——这也是基准里 64B 载荷的帧往返也只有 6 allocs/op 的原因之一。
+- 先校验、后分配：`payloadLen` 的上限判断（frame.go:191）在 `make([]byte, payloadLen)` 之前。顺序反了就是"先按对端报的长度申请内存、再判断合不合法"，等于把 OOM 开关交给对端——这是协议实现最常见也最致命的一类错误。
+- `io.ReadFull` 而不是 `Read` + 循环：`ReadFull` 的契约就是"读满 n 字节或出错"，半包在它内部被循环消化。`bufio` 解决的是另一个问题（减少 syscall 次数），两者不可互相替代：没有 bufio，一个带元数据的帧要走 4 次 `read(2)`（头/metaLen/元数据/载荷各一次，ReadFull 内部还可能再循环）；没有 ReadFull，`Read` 只保证"读到至少 1 字节"，一次拿到半个帧头就会把状态读乱。
 
-**为什么解析器"无状态"是个成就而不是偷懒**：变长长度编码（WebSocket 的 7/16/64 位）要求解码端跨帧记住"上一次读到哪儿了"，于是出现了一类只能靠状态机消灭的 bug——某次读超时/半包导致状态错位，后续所有帧全部失步，而且现场极难复现。定长 4B 长度前缀把状态机的需求降为零：`ReadFrame` 是个纯函数式的 `(io.Reader) → (*Frame, error)`，可以单测、可以 fuzz（fuzz_test.go 的 `FuzzReadFrame` 就是这么做的），也可以在任意位置丢帧重入。
+为什么解析器"无状态"是个成就而不是偷懒：变长长度编码（WebSocket 的 7/16/64 位）要求解码端跨帧记住"上一次读到哪儿了"，于是出现了一类只能靠状态机消灭的 bug——某次读超时/半包导致状态错位，后续所有帧全部失步，而且现场极难复现。定长 4B 长度前缀把状态机的需求降为零：`ReadFrame` 是个纯函数式的 `(io.Reader) → (*Frame, error)`，可以单测、可以 fuzz（fuzz_test.go 的 `FuzzReadFrame` 就是这么做的），也可以在任意位置丢帧重入。
 
-**代价要诚实**：无状态换来的代价是每帧固定 14B 头（design-notes §1.2 的"自付保险费"）和 16MiB 的单帧上限（>16MiB 的消息被顶回给应用层自己切块）。
+这个取舍的代价同样具体：每帧固定 14B 头（design-notes §1.2 的"自付保险费"）和 16MiB 的单帧上限（>16MiB 的消息被顶回给应用层自己切块）。
 
 ### 4.2 协议层：一条交互流 = 一个 `flow` + 一个缓冲通道，逐帧交付
 
@@ -156,25 +156,25 @@ io.ReadFull(r, f.Metadata) / io.ReadFull(r, f.Payload)  // ③ 变长段
 - `flow`（flow.go:26）：流的身份（id/kind）、终结状态（done/err/doneCh）、背压记账（inflight/pendingCredit）、以及一个 `frames chan *Frame`（深 32）。
 - 消费端三种视角：`ReadStream.Next`（拉）、`Channel.Receive`（拉）、`Subscription.consume`（推，回调逐帧串行）。
 
-**关键取舍：缓冲深度 32 是"未启用背压时的兜底"，不是"设计出来的窗口"**。启用 credit 时在途条数被 credit 窗口（通常 ≪ 32）约束，缓冲根本积压；未启用时缓冲写满会让 `deliver` 阻塞读循环，反压一路传导到 TCP 接收窗口——也就是"关闭背压 = 信任 TCP 兜底"的字面含义。备选是"缓冲深度与 credit 窗口联动"：那要让 flow 感知协商结果，而 flow 的构造在 `newFlow` 里、协商结果在 endpoint 上，多一层耦合换来的只是省几个槽位，不值。
+关键取舍：缓冲深度 32 是"未启用背压时的兜底"，不是"设计出来的窗口"。启用 credit 时在途条数被 credit 窗口（通常 ≪ 32）约束，缓冲根本积压；未启用时缓冲写满会让 `deliver` 阻塞读循环，反压一路传导到 TCP 接收窗口——也就是"关闭背压 = 信任 TCP 兜底"的字面含义。备选是"缓冲深度与 credit 窗口联动"：那要让 flow 感知协商结果，而 flow 的构造在 `newFlow` 里、协商结果在 endpoint 上，多一层耦合换来的只是省几个槽位，不值。
 
-**另一处非显然的取舍：`frames` 存指针不存值**。一帧载荷最大 16MiB，复制进通道意味着每个中转点都付一次 L 的拷贝；存指针则"谁投递谁负责生命周期"。代价是帧的内存所有权变得微妙——保留队列直接持引用（§5.5）而不深拷贝，前提是**栈内没有任何代码修改 `Frame` 的字段**。这条不变式没有类型系统保护（`Frame` 是可变的结构体），它靠注释和 code review 维持；真正的保险是"编码发生在写循环、编码后不再有人碰那个 `Frame`"这一时序事实。
+另一处非显然的取舍：`frames` 存指针不存值。一帧载荷最大 16MiB，复制进通道意味着每个中转点都付一次 L 的拷贝；存指针则"谁投递谁负责生命周期"。代价是帧的内存所有权变得微妙——保留队列直接持引用（§5.5）而不深拷贝，前提是栈内没有任何代码修改 `Frame` 的字段。这条不变式没有类型系统保护（`Frame` 是可变的结构体），它靠注释和 code review 维持；真正的保险是"编码发生在写循环、编码后不再有人碰那个 `Frame`"这一时序事实。
 
 ### 4.3 应用层：延迟解码——本实现对"流式 vs DOM"的取舍
 
-③ 层是 JSON 怎么进内存。本实现**既不是纯 DOM 也不是 token 流**，而是第三种：**帧级流式 + 载荷延迟解码**。
+③ 层是 JSON 怎么进内存。本实现既不是纯 DOM 也不是 token 流，而是第三种：帧级流式 + 载荷延迟解码。
 
 - 不用 DOM（`json.Unmarshal` 到具体类型）立刻解析：分发路径上有大量帧的 payload 根本没人看——路由只看 Metadata、保留队列只是原样重放、订阅转发不解包。只有真正到了 handler/应用手里才需要解析。立刻解析等于为"不看"也付全额 CPU。
-- 不用 token 流（`json.Decoder.Token()` 逐 token 事件）：帧边界已经是天然的、自描述的"流单元"，在它内部再套一层 token 状态机，要多一套状态（当前在对象的第几个 key、数组下标、嵌套深度）却换不来任何东西——因为**我们从来不需要"读到一半就开始处理"**：一帧最大 16MiB，已经被内存上限挡住了，"大于内存预算的流"这个 token 流唯一的典型场景在这里不存在。
-- 用 `json.RawMessage`（message.go:17）做中间态：它只是 `[]byte` 的类型别名，附一个 `MarshalJSON`，`Unmarshal` 到它时只做一次合法性扫描、**不建树**。应用想要结构时才 `Decode(v)` 付解析成本。
+- 不用 token 流（`json.Decoder.Token()` 逐 token 事件）：帧边界已经是天然的、自描述的"流单元"，在它内部再套一层 token 状态机，要多一套状态（当前在对象的第几个 key、数组下标、嵌套深度）却换不来任何东西——因为我们从来不需要"读到一半就开始处理"：一帧最大 16MiB，已经被内存上限挡住了，"大于内存预算的流"这个 token 流唯一的典型场景在这里不存在。
+- 用 `json.RawMessage`（message.go:17）做中间态：它只是 `[]byte` 的类型别名，附一个 `MarshalJSON`，`Unmarshal` 到它时只做一次合法性扫描、不建树。应用想要结构时才 `Decode(v)` 付解析成本。
 
-这条不变式是 §5.1 的"栈内恒明文"在 JSON 层的延伸：**协议栈的任何一层都不假设 payload 的形状**。收益不只是性能，还有正确性——`RawMessage` 保留原始字节，转发/重放不会引入浮点精度漂移（`1e400`、`9007199254740993` 这类值过一遍 `float64` 就变了）。
+这条不变式是 §5.1 的"栈内恒明文"在 JSON 层的延伸：协议栈的任何一层都不假设 payload 的形状。收益不只是性能，还有正确性——`RawMessage` 保留原始字节，转发/重放不会引入浮点精度漂移（`1e400`、`9007199254740993` 这类值过一遍 `float64` 就变了）。
 
-**诚实的反面**：`Decode(v)` 是"要么全解、要么失败"的原子操作，无法只取对象里的一个字段。NDJSON 式"一帧一个巨大数组、只关心前几项"的场景，这里只能整体解——真要支持就得把 `Decode` 换成 `json.Decoder` 的游标式读取，那是一条明确但要付"读过头"与"状态机"代价的路（NOTES.md §2 展开这条路的两难）。
+这条取舍的反面：`Decode(v)` 是"要么全解、要么失败"的原子操作，无法只取对象里的一个字段。NDJSON 式"一帧一个巨大数组、只关心前几项"的场景，这里只能整体解——真要支持就得把 `Decode` 换成 `json.Decoder` 的游标式读取，那是一条明确但要付"读过头"与"状态机"代价的路（NOTES.md §2 展开这条路的两难）。
 
 ### 4.4 "读过头"问题：握手与传输层共享同一个 bufio.Reader
 
-流式解析里最阴的一类 bug 是**读过头**：解析器为了填满自己的缓冲，把下一条消息的开头也读走了，而上层以为消息之间有干净的边界。JSON 有 `Decoder.Buffered()` 专门暴露这个"多读的余量"；本项目在帧层面对同样的问题，解法是**让两个阶段共享同一个 reader 对象，而不是各自新建**：
+流式解析里最阴的一类 bug 是读过头：解析器为了填满自己的缓冲，把下一条消息的开头也读走了，而上层以为消息之间有干净的边界。JSON 有 `Decoder.Buffered()` 专门暴露这个"多读的余量"；本项目在帧层面对同样的问题，解法是让两个阶段共享同一个 reader 对象，而不是各自新建：
 
 ```go
 br := bufio.NewReader(nc)          // 握手阶段
@@ -184,7 +184,7 @@ tr := newTransport(nc, br, …)      // ← 关键：把 br 本身交给 transpo
 
 `transport` 因此有一个类型是 `io.Reader` 而不是 `*bufio.Reader` 的字段（transport.go:17，注释写明"与握手阶段共享的 bufio，避免缓冲数据丢失"）。如果这里写成 `bufio.NewReaderSize(conn, …)`（`readLoop` 里确实又包了一层，见 transport.go:175），第二层 bufio 会从 conn 重新取字节，而握手阶段的 br 缓冲里那几字节就被永久跳过——表现为"偶发丢第一帧"，且只在 CONNACK 与首个数据帧同批到达时出现，极难复现。
 
-注意 `readLoop` 里那层 `bufio.NewReaderSize` 之所以**安全**，是因为它包的是 `t.reader`（那个共享的 br）而不是 `conn`：多一层缓冲只多一次内存拷贝，不会跨阶段抢字节。这个"看起来像冗余、实际是兜底"的写法值得在 code review 里明确说明，否则下一个人会"顺手优化掉"它。
+注意 `readLoop` 里那层 `bufio.NewReaderSize` 之所以安全，是因为它包的是 `t.reader`（那个共享的 br）而不是 `conn`：多一层缓冲只多一次内存拷贝，不会跨阶段抢字节。这个"看起来像冗余、实际是兜底"的写法值得在 code review 里明确说明，否则下一个人会"顺手优化掉"它。
 
 ## 5. 关键数据结构
 
@@ -198,7 +198,7 @@ type Frame struct {
 }
 ```
 
-**不变式：payload 在协议栈内部永远是明文**，压缩/加密只发生在 transport 的 outbound/inbound 两个边界函数。备选方案是让 Frame 携带"已加密"状态在栈内流转——放弃，因为每个消费点都得先判断帧是否已解密，一处遗漏就是拿密文当 JSON 解析的 bug；边界化之后，栈内所有代码（路由、分发、保留队列）天然只见明文。
+不变式：payload 在协议栈内部永远是明文，压缩/加密只发生在 transport 的 outbound/inbound 两个边界函数。备选方案是让 Frame 携带"已加密"状态在栈内流转——放弃，因为每个消费点都得先判断帧是否已解密，一处遗漏就是拿密文当 JSON 解析的 bug；边界化之后，栈内所有代码（路由、分发、保留队列）天然只见明文。
 
 ### 5.2 flow（flow.go:26）——单条流的本端视图
 
@@ -220,7 +220,7 @@ type flow struct {
 
 一个结构同时表示"我发起的流"与"我在响应的流"——差异只在 kind 与谁持有 frames 的读取端。备选是 initiator/responder 两个结构：放弃，因为双工通道（Channel）本质上同时是两者，拆开会让 Channel 持有两个半流对象，状态同步（对端 CANCEL 时两边都要终结）立刻变复杂。
 
-终结语义收敛为一个原语：`finish(e)` 在锁内写 done/err、`close(doneCh)`、注销流表，幂等。所有等待方（Next/Receive/Request 的 select、streamContext.Done）监听 doneCh。**err 必须在锁内读**（`doneState`）——曾因 `Err()` 裸读与读循环 finish 写竞争被 CI race 实锤（README bug 清单外的一条修复），此后统一收口。
+终结语义收敛为一个原语：`finish(e)` 在锁内写 done/err、`close(doneCh)`、注销流表，幂等。所有等待方（Next/Receive/Request 的 select、streamContext.Done）监听 doneCh。err 必须在锁内读（`doneState`）——曾因 `Err()` 裸读与读循环 finish 写竞争被 CI race 实锤（README bug 清单外的一条修复），此后统一收口。
 
 ### 5.3 endpoint（endpoint.go:12）——流调度核心
 
@@ -237,7 +237,7 @@ type endpoint struct {
 }
 ```
 
-**Client 与 Server 共用 endpoint 是本实现最大的一条复用决策**：分发、被动流准备、五个发起原语、流表、credit 全部只写一遍；两侧差异压缩成"clientSide 决定 ID 奇偶 + 三个可空钩子"。备选方案：客户端/服务端各一套调度器——放弃，因为 pub/sub 双向语义（PUBLISH 同一帧类型两个方向）与双工通道要求两侧逻辑对称，两套实现必然漂移，测试矩阵也要翻倍。代价是 endpoint 的 API 面比"纯客户端"宽（客户端也会带着 onSubscribe==nil 的空分支），换来的是行为对称性有单一事实来源。
+Client 与 Server 共用 endpoint 是本实现最大的一条复用决策：分发、被动流准备、五个发起原语、流表、credit 全部只写一遍；两侧差异压缩成"clientSide 决定 ID 奇偶 + 三个可空钩子"。备选方案：客户端/服务端各一套调度器——放弃，因为 pub/sub 双向语义（PUBLISH 同一帧类型两个方向）与双工通道要求两侧逻辑对称，两套实现必然漂移，测试矩阵也要翻倍。代价是 endpoint 的 API 面比"纯客户端"宽（客户端也会带着 onSubscribe==nil 的空分支），换来的是行为对称性有单一事实来源。
 
 ### 5.4 transport（transport.go:15）
 
@@ -278,7 +278,7 @@ type serverSession struct {
 | Subscription.consume | 订阅存活期 | 逐帧调回调（串行投递的保证者） |
 | connectLoop（仅客户端） | Client 存活期 | 重连状态机 |
 
-**设计原则：每条流最多一个执行 goroutine，每条连接恰好两个 I/O goroutine。** 备选方案对比：
+设计原则：每条流最多一个执行 goroutine，每条连接恰好两个 I/O goroutine。备选方案对比：
 
 - *单 goroutine per connection + 回调分发*（net/rpc 模式）：读循环直接执行 handler，实现最简单；放弃，因为任何一个慢 handler 都会停摆该连接所有流的读入（队头阻塞），心跳也随之停发——读写必须分离，执行必须与读入分离。
 - *每帧一个 goroutine*：吞吐上限高；放弃，因为流式语义（handler 串行 Emit、订阅回调串行投递）要求顺序，无界并发反而要再引入序列化层。
@@ -295,17 +295,17 @@ type serverSession struct {
 | routeTable.mu (RW) | 注册表 | 运行中注册对新请求立即生效 |
 | Client.mu / Server.mu / sessionStore.mu / serverSession.mu | 各自字段 | 锁序见下 |
 
-锁序（获取顺序）：`store.mu → ss.mu`（不嵌套，先快照再取）、`ss.mu → ep.streamsMu`（单向）、`flow.mu` 不与任何锁嵌套。sendCh(256)/frames(32)/notify(1)/dead/doneCh/ackCh 的容量与信号语义都写在类型注释里——**cap-1 的 notify 是"信号量"而非"队列"**（credit.go:12），多路 add 只需唤醒一次，`select+default` 投递永不阻塞。
+锁序（获取顺序）：`store.mu → ss.mu`（不嵌套，先快照再取）、`ss.mu → ep.streamsMu`（单向）、`flow.mu` 不与任何锁嵌套。sendCh(256)/frames(32)/notify(1)/dead/doneCh/ackCh 的容量与信号语义都写在类型注释里——cap-1 的 notify 是"信号量"而非"队列"（credit.go:12），多路 add 只需唤醒一次，`select+default` 投递永不阻塞。
 
 ### 6.3 出站串行化：为什么是 sendCh 而不是写锁
 
 所有出站帧（数据、错误、CANCEL、CREDIT、心跳）进同一条 sendCh，由写循环单点写出。备选：`sync.Mutex` 包住 conn.Write——更直接，但三个理由选 channel：(1) 写循环要与心跳 ticker 做 `select`，mutex 模式下心跳注入需要独立的 ticker goroutine 或定时抢锁；(2) sendCh 天然有 256 帧的缓冲，应用 goroutine 与 socket 速度解耦，等价于一层小发送窗口；(3) close(dead) 之后 send 返回 ErrClosed 的语义可以和 select 自然组合。代价是写循环 goroutine 本身与一次 channel 往返（~百 ns 级，相对网络 RTT 可忽略）。
 
-send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接死后 sendCh 常有空位，`select` 双就绪随机选择，同一次 kill 后的 send 会不确定性地产出"帧入队但永不写出"或 ErrClosed——**Go 的 select 随机性在错误路径上是真陷阱**，消灭它的办法是给死分支优先预检。
+send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接死后 sendCh 常有空位，`select` 双就绪随机选择，同一次 kill 后的 send 会不确定性地产出"帧入队但永不写出"或 ErrClosed——Go 的 select 随机性在错误路径上是真陷阱，消灭它的办法是给死分支优先预检。
 
 ### 6.4 确定性交付：排空语义
 
-终结与数据帧的交付是异步的（doneCh 关闭时 frames 里可能还有余帧），而 `select` 双就绪随机选择——所以 `ReadStream.Next`/`Channel.Receive`/`doRequest` 的 doneCh 分支都要**先排空 frames 再返回终结**（flow.go:181 注释），否则会随机丢最后一帧。CANCEL/ERROR 例外：立即终结语义优先，在途帧语义上作废。
+终结与数据帧的交付是异步的（doneCh 关闭时 frames 里可能还有余帧），而 `select` 双就绪随机选择——所以 `ReadStream.Next`/`Channel.Receive`/`doRequest` 的 doneCh 分支都要先排空 frames 再返回终结（flow.go:181 注释），否则会随机丢最后一帧。CANCEL/ERROR 例外：立即终结语义优先，在途帧语义上作废。
 
 ## 7. 错误处理策略
 
@@ -319,15 +319,15 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 
 配套纪律：
 
-- **panic 一律 recover 在协议栈边界**（runRequest/serveOneWay/topic handler 三处），单条流的应用崩溃绝不带崩进程，也不会泄漏未终结的 flow（recover 路径同样走到 finish/错误帧）。
-- **错误帧的编解码有兜底**：`errDecode` 对不可解码载荷归一为 INTERNAL，而不是把对端的畸形错误帧变成连接级失败。
-- **资源释放单点化**：连接关闭只在 kill 一处（deadOnce 幂等）；`Server.handleConn` 用 defer Close 兜底握手失败路径；`Subscription.Close`/`Client.Close` 都是 `sync.Once`/幂等语义——**释放接口必须可重入**，否则使用方的 defer 链里必然出现 double-close。
-- **断连即败的"无意义等待"剪除**：服务端发起的流（偶数 ID）响应是上行、不缓存，断连后等待必然落空，onDead 立即 fail（server.go:379 注释）；客户端发起的 responder 流归会话保留，两类流在同一次断连里的命运不同，这是 at-least-once 语义的直接推论。
-- **一处已知的类型系统盲区**：`asStreamError`（message.go:108）用 `err.(*Error)` 做类型断言，若应用返回的是**类型为 nil 的 `*Error`**（`var e *Error; return nil, e` 这类写法），断言会成功并返回 nil，随后 `errorFrame` 把 `nil` 编码成 `null`，对端 `errDecode` 因 `code==0` 归一为 INTERNAL。结论是**降级而非崩溃**（typed-nil-in-interface 陷阱的典型形态），但错误信息会丢失。要彻底消除得写成 `if e, ok := err.(*Error); ok && e != nil`——没改的原因是它会让"应用故意返回 nil *Error"这种病态写法更难被察觉，而降级后的行为已经安全；这一点在此显式记录，作为已知边界而不是遗漏。该契约现已有测试钉住（此前三段链条只存在于本节文字里）：`TestTypedNilErrorPayloadRoundTrip`（纯函数：断言返回 nil → 载荷 `null` → 对端归一 INTERNAL，三段逐环断言）、`TestTypedNilErrorDegradesOnWire`（裸连看线上原文：流级 ERROR、载荷字面量 `null`、同连接下一流照常 RESPONSE）、`TestTypedNilErrorClientSeesNormalizedInternal`（应用侧：REQUEST 与 STREAM 两臂都收到 INTERNAL 归一形态且连接存活）。改形方案的隐患已被变异实测反证：守卫若写成 `ok && e != nil`，归一路径会去调 typed-nil 的 `Error()`，nil 解引用当场 panic——单元测试直接炸，端到端只剩 runRequest 的 recover 兜着。现状因此不只是"已文档化"，而是"被钉住"。
+- panic 一律 recover 在协议栈边界（runRequest/serveOneWay/topic handler 三处），单条流的应用崩溃绝不带崩进程，也不会泄漏未终结的 flow（recover 路径同样走到 finish/错误帧）。
+- 错误帧的编解码有兜底：`errDecode` 对不可解码载荷归一为 INTERNAL，而不是把对端的畸形错误帧变成连接级失败。
+- 资源释放单点化：连接关闭只在 kill 一处（deadOnce 幂等）；`Server.handleConn` 用 defer Close 兜底握手失败路径；`Subscription.Close`/`Client.Close` 都是 `sync.Once`/幂等语义——释放接口必须可重入，否则使用方的 defer 链里必然出现 double-close。
+- 断连即败的"无意义等待"剪除：服务端发起的流（偶数 ID）响应是上行、不缓存，断连后等待必然落空，onDead 立即 fail（server.go:379 注释）；客户端发起的 responder 流归会话保留，两类流在同一次断连里的命运不同，这是 at-least-once 语义的直接推论。
+- 一处已知的类型系统盲区：`asStreamError`（message.go:108）用 `err.(*Error)` 做类型断言，若应用返回的是类型为 nil 的 `*Error`（`var e *Error; return nil, e` 这类写法），断言会成功并返回 nil，随后 `errorFrame` 把 `nil` 编码成 `null`，对端 `errDecode` 因 `code==0` 归一为 INTERNAL。结论是降级而非崩溃（typed-nil-in-interface 陷阱的典型形态），但错误信息会丢失。要彻底消除得写成 `if e, ok := err.(*Error); ok && e != nil`——没改的原因是它会让"应用故意返回 nil *Error"这种病态写法更难被察觉，而降级后的行为已经安全；这一点在此显式记录，作为已知边界而不是遗漏。该契约现已有测试钉住（此前三段链条只存在于本节文字里）：`TestTypedNilErrorPayloadRoundTrip`（纯函数：断言返回 nil → 载荷 `null` → 对端归一 INTERNAL，三段逐环断言）、`TestTypedNilErrorDegradesOnWire`（裸连看线上原文：流级 ERROR、载荷字面量 `null`、同连接下一流照常 RESPONSE）、`TestTypedNilErrorClientSeesNormalizedInternal`（应用侧：REQUEST 与 STREAM 两臂都收到 INTERNAL 归一形态且连接存活）。改形方案的隐患已被变异实测反证：守卫若写成 `ok && e != nil`，归一路径会去调 typed-nil 的 `Error()`，nil 解引用当场 panic——单元测试直接炸，端到端只剩 runRequest 的 recover 兜着。现状因此不只是"已文档化"，而是"被钉住"。
 
 ## 8. 边界情况清单
 
-这份清单是"读代码时最容易看漏、线上最容易炸"的那一类输入与时序。每一行给出：**触发条件 → 处置 → 代码位置 → 为什么这么处置**。测试侧的对应关系见 design-notes.md §9（覆盖率 100% 意味着每一行都有断言，只是不在此重复）。
+这份清单是"读代码时最容易看漏、线上最容易炸"的那一类输入与时序。每一行给出：触发条件 → 处置 → 代码位置 → 为什么这么处置。测试侧的对应关系见 design-notes.md §9（覆盖率 100% 意味着每一行都有断言，只是不在此重复）。
 
 ### 8.1 帧层：来自对端的任意字节
 
@@ -402,10 +402,10 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 | `deliver` 投递 | O(1) | O(1) | 通道操作，帧传指针不拷贝 |
 | 路由查找 | O(1) 期望 | O(1) | map 哈希 |
 
-**分解出的固定成本 vs 边际成本**（本机实测，见 §11 表格）：小帧 ~1µs/帧的固定开销、~0.5–1.6 ns/B 的边际开销，两者在 L ≈ 1–2KiB 附近交叉。也就是说：
+分解出的固定成本 vs 边际成本（本机实测，见 §11 表格）：小帧 ~1µs/帧的固定开销、~0.5–1.6 ns/B 的边际开销，两者在 L ≈ 1–2KiB 附近交叉。也就是说：
 
-- **小消息为主**（<1KiB，如 RPC 的 `{"id":…,"result":…}`）：瓶颈是每帧固定开销，与载荷大小几乎无关 → 优化方向是减少帧数/系统调用（批量写、帧头压缩），不是压缩载荷。
-- **大消息为主**（>64KiB，如批量导出）：瓶颈是带宽与拷贝 → 压缩才有意义（这正是 `minCompressSize=64` 阈值与"按帧而非按连接决定是否压缩"的依据）。
+- 小消息为主（<1KiB，如 RPC 的 `{"id":…,"result":…}`）：瓶颈是每帧固定开销，与载荷大小几乎无关 → 优化方向是减少帧数/系统调用（批量写、帧头压缩），不是压缩载荷。
+- 大消息为主（>64KiB，如批量导出）：瓶颈是带宽与拷贝 → 压缩才有意义（这正是 `minCompressSize=64` 阈值与"按帧而非按连接决定是否压缩"的依据）。
 
 ### 9.2 并发与内存上界
 
@@ -418,11 +418,11 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 | 保留队列 | 1/会话 | ≤ `RetentionBytes`（4MiB） | 字节记账，超限降级 |
 | 单帧载荷 | — | ≤ 16MiB | 硬上限，分配前校验 |
 
-**必须说清的一点：16MiB 上限约束的是"单帧"，不是"总量"。** 未启用 credit 时，内存的真实上界是 `32 × N × 平均帧长`——一个 N=1000、平均帧 1MiB 的连接可以合法地吃掉 32GiB。真正的总量约束由三样东西提供，缺一不可：
+16MiB 上限约束的是"单帧"，不是"总量"。未启用 credit 时，内存的真实上界是 `32 × N × 平均帧长`——一个 N=1000、平均帧 1MiB 的连接可以合法地吃掉 32GiB。真正的总量约束由三样东西提供，缺一不可：
 
-1. **credit 窗口**（可选，默认关）：把在途条数钉在 W 以内；
-2. **32 深的通道缓冲**：写满后读循环阻塞，反压传导到 TCP 接收窗口；
-3. **单帧 16MiB 上限**：防止"一条恶意大帧"打爆单点分配。
+1. credit 窗口（可选，默认关）：把在途条数钉在 W 以内；
+2. 32 深的通道缓冲：写满后读循环阻塞，反压传导到 TCP 接收窗口；
+3. 单帧 16MiB 上限：防止"一条恶意大帧"打爆单点分配。
 
 这也是"背压默认关闭"这个决策的真实代价（design-notes §5.2 第 4 条）：默认配置下的内存安全依赖 TCP 缓冲 + 应用自律，协议层不提供硬保证。要给硬保证就把 credit 打开，并在文档里说清它会阻塞 handler。
 
@@ -439,7 +439,7 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 
 ### 9.4 端到端
 
-一次请求/响应的完整成本 = 2 帧 × (编码 + 变换 + 写 syscall) + 2 × (读 + 变换 + 解码) + 2 次 JSON 编解码 + 2 次 handler goroutine 调度 + 1 个 RTT。实测 33 allocs/op（明文）、39 allocs/op（加密）——**加密的额外 6 次分配全部来自 nonce 与密文缓冲**，与"每帧多 28B 上线开销"一致。
+一次请求/响应的完整成本 = 2 帧 × (编码 + 变换 + 写 syscall) + 2 × (读 + 变换 + 解码) + 2 次 JSON 编解码 + 2 次 handler goroutine 调度 + 1 个 RTT。实测 33 allocs/op（明文）、39 allocs/op（加密）——加密的额外 6 次分配全部来自 nonce 与密文缓冲，与"每帧多 28B 上线开销"一致。
 
 稳态成本是每 `Heartbeat` 一次 14B 写；读侧每帧一次 `SetReadDeadline`（netpoll 的 deadline 表更新，纳秒级）。两者都远小于一次 RTT，所以"心跳开着"不会成为吞吐瓶颈——这是把心跳做成"每连接独立 ticker"而不是"全局扫描"的理由。
 
@@ -447,19 +447,19 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 
 > 协议层决策（帧头为什么 14B、FIN 分片为何换形为独立 FRAGMENT 帧型、MASK/变长长度为何不做、Flags 合并请求入口、credit vs LEASE vs 滑动窗口、Metadata 分离、先压后加）的完整论证见 [design-notes.md](design-notes.md) §1–§5，此处只列实现层决策。
 
-- **D1 共用 endpoint 抽象**（§5.3）。备选：客户端/服务端两套调度器——放弃理由：双工与 pub/sub 要求两侧逻辑对称，两套实现必然漂移；现状代价是 client 侧带着三个 nil 钩子的空分支。
-- **D2 读写双循环 + 每流执行 goroutine**（§6.1）。备选：单 goroutine 串行分发（慢 handler 队头阻塞心跳）、固定 worker 池（背压阻塞占满池）。选中方案以 goroutine 数量换取消语义的干净。
-- **D3 出站统一 sendCh(256) 单点写**（§6.3）。备选：写锁（心跳注入别扭、无缓冲解耦）。
-- **D4 kill 单点收尾 + dead channel 广播**。备选：各处自查 conn 状态——放弃，竞态窗口遍布；sync.Once + close(chan) 是 Go 里"一次性广播"的最简正解。
-- **D5 被动流注册同步、handler 执行异步**（endpoint.go:205 注释）。`prepareRequest` 在 readLoop 的同步路径完成路由查找/校验/注册，`runRequest` 才进 goroutine。备选：全异步（注册也在 goroutine 里）——放弃，对端发起 Channel 后会立即发数据帧，注册晚于数据帧到达时 lookupFlow miss，帧被静默丢弃，双方死等（实测会发生的互锁）。同步注册的代价是 readLoop 被路由表查找（RLock）短暂占用，可忽略。
-- **D6 flow 终结 = close(doneCh) 单原语**。备选：状态枚举 + 轮询——放弃，close 的广播语义让所有等待方一次感知，且 streamContext 直接把 doneCh 包装成 context.Context，handler 的 ctx 取消免费获得。
-- **D7 出站一律经当前 endpoint**（flow.currentEP()）。备选：流持有构造时的 endpoint——被 bug 9-6 实锤放弃：重连后 CANCEL/UNSUBSCRIBE 发给死连接被静默吞掉，对端 handler 永远收不到取消。`currentEP()` 的锁开销换消灭一整类陈旧引用 bug。
-- **D8 Stream ID 奇偶 + 跨重连单调**。奇偶（HTTP/2 同思路）让新到帧无需协商即可判归属；`bindSession` 把 `oldEp.nextID` 过继给新端点（client.go:379）——重置会让新流与迁移流撞号，旧连接迟到的 COMPLETE 误杀新流（bug 9-5）。
-- **D9 会话保留 per-session 内存队列 + 字节上限 + 溢出降级**。备选：写磁盘/外部 broker（题面外）、无上限（OOM 开关）、溢出即断会话（过于激进——降级为"失去恢复资格但连接可用"既防 OOM 又不惩罚已建立的连接）。
-- **D10 心跳由写循环注入、死活由读 deadline 判定**。写侧 ticker 到期发 PING，读侧每帧重置 `SetReadDeadline(1.5×间隔)`。备选：TCP keepalive（探不到对端进程死锁/GC 停顿——它测的是内核协议栈）；读侧主动探测（会把心跳职责和读职责搅在一起）。1.5× 是容忍一次丢帧抖动与判死速度的折中。
-- **D11 flate 编解码器 sync.Pool 按帧复用**。实测每帧新建 writer 代价 ~1.3ms/~800KB 分配，池化 + Reset 后压缩往返 4.1 倍提速、分配降 162 倍（README 基准）。备选：每帧新建（太贵）、连接级单实例（读写循环已在单 goroutine 内，但订阅消费与 handler 并发 Emit 会竞争）。
-- **D12 变换在帧级、标志在帧内自描述**。每帧 Flags 如实标注本帧是否压缩/加密，解码只看帧不看协商（design-notes §3）——实现层配套：`transformer` 无锁（纯函数式进出），栈内明文不变式（§5.1）。
-- **D13 测试接缝只设五个包级 var**（jsonMarshal/aesNewCipher/gcmNew/randRead/resubAckTimeout）。这些构造在合法入参下不会失败，其错误分支是防御性死码；接缝之外覆盖率全靠并发时序构造，不动生产逻辑。备选：接口化全部依赖（过度设计）、不设接缝（防御分支永远测不到）。
+- D1 共用 endpoint 抽象（§5.3）。备选：客户端/服务端两套调度器——放弃理由：双工与 pub/sub 要求两侧逻辑对称，两套实现必然漂移；现状代价是 client 侧带着三个 nil 钩子的空分支。
+- D2 读写双循环 + 每流执行 goroutine（§6.1）。备选：单 goroutine 串行分发（慢 handler 队头阻塞心跳）、固定 worker 池（背压阻塞占满池）。选中方案以 goroutine 数量换取消语义的干净。
+- D3 出站统一 sendCh(256) 单点写（§6.3）。备选：写锁（心跳注入别扭、无缓冲解耦）。
+- D4 kill 单点收尾 + dead channel 广播。备选：各处自查 conn 状态——放弃，竞态窗口遍布；sync.Once + close(chan) 是 Go 里"一次性广播"的最简正解。
+- D5 被动流注册同步、handler 执行异步（endpoint.go:205 注释）。`prepareRequest` 在 readLoop 的同步路径完成路由查找/校验/注册，`runRequest` 才进 goroutine。备选：全异步（注册也在 goroutine 里）——放弃，对端发起 Channel 后会立即发数据帧，注册晚于数据帧到达时 lookupFlow miss，帧被静默丢弃，双方死等（实测会发生的互锁）。同步注册的代价是 readLoop 被路由表查找（RLock）短暂占用，可忽略。
+- D6 flow 终结 = close(doneCh) 单原语。备选：状态枚举 + 轮询——放弃，close 的广播语义让所有等待方一次感知，且 streamContext 直接把 doneCh 包装成 context.Context，handler 的 ctx 取消免费获得。
+- D7 出站一律经当前 endpoint（flow.currentEP()）。备选：流持有构造时的 endpoint——被 bug 9-6 实锤放弃：重连后 CANCEL/UNSUBSCRIBE 发给死连接被静默吞掉，对端 handler 永远收不到取消。`currentEP()` 的锁开销换消灭一整类陈旧引用 bug。
+- D8 Stream ID 奇偶 + 跨重连单调。奇偶（HTTP/2 同思路）让新到帧无需协商即可判归属；`bindSession` 把 `oldEp.nextID` 过继给新端点（client.go:379）——重置会让新流与迁移流撞号，旧连接迟到的 COMPLETE 误杀新流（bug 9-5）。
+- D9 会话保留 per-session 内存队列 + 字节上限 + 溢出降级。备选：写磁盘/外部 broker（题面外）、无上限（OOM 开关）、溢出即断会话（过于激进——降级为"失去恢复资格但连接可用"既防 OOM 又不惩罚已建立的连接）。
+- D10 心跳由写循环注入、死活由读 deadline 判定。写侧 ticker 到期发 PING，读侧每帧重置 `SetReadDeadline(1.5×间隔)`。备选：TCP keepalive（探不到对端进程死锁/GC 停顿——它测的是内核协议栈）；读侧主动探测（会把心跳职责和读职责搅在一起）。1.5× 是容忍一次丢帧抖动与判死速度的折中。
+- D11 flate 编解码器 sync.Pool 按帧复用。实测每帧新建 writer 代价 ~1.3ms/~800KB 分配，池化 + Reset 后压缩往返 4.1 倍提速、分配降 162 倍（README 基准）。备选：每帧新建（太贵）、连接级单实例（读写循环已在单 goroutine 内，但订阅消费与 handler 并发 Emit 会竞争）。
+- D12 变换在帧级、标志在帧内自描述。每帧 Flags 如实标注本帧是否压缩/加密，解码只看帧不看协商（design-notes §3）——实现层配套：`transformer` 无锁（纯函数式进出），栈内明文不变式（§5.1）。
+- D13 测试接缝只设五个包级 var（jsonMarshal/aesNewCipher/gcmNew/randRead/resubAckTimeout）。这些构造在合法入参下不会失败，其错误分支是防御性死码；接缝之外覆盖率全靠并发时序构造，不动生产逻辑。备选：接口化全部依赖（过度设计）、不设接缝（防御分支永远测不到）。
 
 ## 11. 实测数据与验证
 
@@ -471,11 +471,11 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 | `examples/server` | 100.0% | 原 1 条窄竞态分支已补齐，构造见 §11.3 |
 | `examples/client` | 100.0% | 原 4 条窄竞态分支已补齐，构造见 §11.3 |
 
-库包覆盖率 100% 的含义要说准：**没有任何"测不到就是死码"的托词**——防御性分支靠五个包级接缝（jsonMarshal/aesNewCipher/gcmNew/randRead/resubAckTimeout）覆盖，其余靠并发时序构造覆盖（design-notes §9）。测试方法学（确定性并发、race detector 纪律）也在那一节。
+库包覆盖率 100% 的含义要说准：没有任何"测不到就是死码"的情况——防御性分支靠五个包级接缝（jsonMarshal/aesNewCipher/gcmNew/randRead/resubAckTimeout）覆盖，其余靠并发时序构造覆盖（design-notes §9）。测试方法学（确定性并发、race detector 纪律）也在那一节。
 
 ### 11.2 性能
 
-下表是**本机实测**（i9-10880H / Go 1.24，`go test -run '^$' -bench . -benchtime 2s -count=3 -benchmem` 取中位数；与 README 表格同机）。共享容器里 ns/op 随负载明显浮动（同基准两次实测可差 ±30% 以上），**可复现的是 allocs/op 与 B/op 这两列结构性质**，时间列只当量级看：
+下表是本机实测（i9-10880H / Go 1.24，`go test -run '^$' -bench . -benchtime 2s -count=3 -benchmem` 取中位数；与 README 表格同机）。共享容器里 ns/op 随负载明显浮动（同基准两次实测可差 ±30% 以上），可复现的是 allocs/op 与 B/op 这两列结构性质，时间列只当量级看：
 
 | 基准 | ns/op（中位） | 吞吐 | allocs/op | B/op |
 | --- | --- | --- | --- | --- |
@@ -491,13 +491,13 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 
 从这组数字能直接读出三条结论（都已写进 §9 的取舍）：
 
-1. **allocs/op 与载荷大小无关**（三种尺寸都是 6）——说明帧头的定长数组与元数据解码没有引入按帧的隐藏分配；大帧的 B/op 线性增长全部来自载荷本身。
-2. **flate 比 GCM 贵 5 倍以上**（15.3µs vs 2.8µs，同一载荷；比值随频点与负载在 5–7× 间浮动）——所以"压缩按帧可选、加密可全开"的参数化策略在性能上是有依据的取舍，而不是口号。
-3. **小帧的固定成本主导**：64B→1KiB 总耗时只涨 ~1.5µs，其中载荷本身的内存操作只占一小部分，大头是每帧固定开销——小消息场景的优化方向是减少帧数与 syscall，不是压载荷。
+1. allocs/op 与载荷大小无关（三种尺寸都是 6）——说明帧头的定长数组与元数据解码没有引入按帧的隐藏分配；大帧的 B/op 线性增长全部来自载荷本身。
+2. flate 比 GCM 贵 5 倍以上（15.3µs vs 2.8µs，同一载荷；比值随频点与负载在 5–7× 间浮动）——所以"压缩按帧可选、加密可全开"的参数化策略有实测依据。
+3. 小帧的固定成本主导：64B→1KiB 总耗时只涨 ~1.5µs，其中载荷本身的内存操作只占一小部分，大头是每帧固定开销——小消息场景的优化方向是减少帧数与 syscall，不是压载荷。
 
 ### 11.3 覆盖率的口径与已知例外
 
-`examples/` 两个包的语句现已全部覆盖（各自 **100.0%**）。这里曾长期记着"5 条窄竞态分支刻意不覆盖"；本轮逐条补齐——没有一条确认为不可达，但补法分三种确定性等级，逐条记录如下，构造方法本身就是这一节的内容：
+`examples/` 两个包的语句现已全部覆盖（各自 100.0%）。这里曾长期记着"5 条窄竞态分支刻意不覆盖"；本轮逐条补齐——没有一条确认为不可达，但补法分三种确定性等级，逐条记录如下，构造方法本身就是这一节的内容：
 
 | 位置 | 分支 | 覆盖构造 |
 | --- | --- | --- |
@@ -507,13 +507,13 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 | `examples/client` `Publish` | 连接在 `SendOneWay` 已成功、`Publish` 之前死掉 | **确定性·钩子 + 正面证据锚定**：唯一实证为纯时序抓不住的分支——掐线锚在 chat ack 回包后的 δ 空转，扫 δ∈{0…480µs} 共 90 轮，无一轮出现"判死报错且 ONEWAY 在线上"（判死链路与主 goroutine 剩余链条赛跑：赢则连上一出口一起死，输则两出口全过）。改用示例侧 `beforePublish` 钩子掐线后，又暴露第二条隐蔽赛跑：写循环把迟到 ONEWAY 推上线与 kill 关 socket 并发，-race 实测约 1/8 轮帧被吞。终版把掐线锚定在对端**收到** ONEWAY 之后并向钩子确认，钩子等确认再加 20ms 传播余量——链条里没有未锚定的赛跑 |
 | `examples/server` `chat` 的 `ch.Send` | `Send` 阻塞在连接级信用闸门、被 CANCEL 解锁 | **确定性·裸连接抽干窗口**：raw TCP 声明 credit=2 且永不回授 CREDIT，生效窗口 min(64, 2)=2；range 两帧上线（线上观测确认——credit 在 take 时扣）后窗口归零、第三条 Emit 永挂；chat 消息使 `ch.Send` 的 take 排进空窗口，CANCEL 关闭该流 ctx → take 返回 CANCELLED → `return err` → 框架的 ERROR(sid=3, code=5) 被裸连接读回。全链正面证据，示例代码零改动 |
 
-三条教训值得单独记：**"覆盖不到"要先实证再采信**——旧版把 Publish 分支归为"窗口微秒级、概率事件"却没量化过；90 轮扫描给出的不是"难"而是"恒不可观测"，正是这个实证把一次小的形状变更（带注释、演示路径恒 nil 的检查点钩子）从"破坏示例"变成"值得付的代价"。**硬币可以做得很厚**——窄窗竞态的漏检来自"到达时刻 vs 窗口"的固定偏置，单次探测赢不了就把到达序列铺满窗口两侧（盲发连发 + `lookupFlow` 对未注册流的静默忽略 = 免费的轮次），偏置消失而判据不变。**掐线的锚点要选在已上线的帧上**——凡"测试侧观察→行动"的时序，观察对象必须是已经发生的正面证据（收到的帧），不是"应该已经发生"的本地时刻。
+三条教训值得单独记："覆盖不到"要先实证再采信——旧版把 Publish 分支归为"窗口微秒级、概率事件"却没量化过；90 轮扫描给出的不是"难"而是"恒不可观测"，正是这个实证把一次小的形状变更（带注释、演示路径恒 nil 的检查点钩子）从"破坏示例"变成"值得付的代价"。硬币可以做得很厚——窄窗竞态的漏检来自"到达时刻 vs 窗口"的固定偏置，单次探测赢不了就把到达序列铺满窗口两侧（盲发连发 + `lookupFlow` 对未注册流的静默忽略 = 免费的轮次），偏置消失而判据不变。掐线的锚点要选在已上线的帧上——凡"测试侧观察→行动"的时序，观察对象必须是已经发生的正面证据（收到的帧），不是"应该已经发生"的本地时刻。
 
 原有判断保留但范围收窄：为覆盖率给示例加 sleep、加测试专用分支、把双工 handler 改写成一次性收发的形态，依然不做。`beforePublish` 是唯一例外，按"读起来像正常工程代码"的标准写（配置结构体上的函数字段、注释说明存在理由），与 `runOptions.callTTL` 同源。库包等价分支另有确定性契约测试（`TestOneWayPublishCtxContracts` 等），示例测试不复重库语义，只证明示例脚本自身会走到这些 return。
 
-已为可覆盖的部分付出的真实代价（不是白得的）：示例服务端为了让 `serve` 可测而抽出 `options`/`parseOptions`/`serve(ctx)`，示例客户端为了让超时可注入而抽出 `runOptions.callTTL`、为了让 Publish 出口可确定性命中而加了 `beforePublish` 检查点；示例双工 handler 补了 `io.EOF` 判断，避免对端正常半关闭时被回一个 `ERROR(INTERNAL)` 帧——这一条是**修 bug，不是补覆盖率**。
+已为可覆盖的部分付出的真实代价：示例服务端为了让 `serve` 可测而抽出 `options`/`parseOptions`/`serve(ctx)`，示例客户端为了让超时可注入而抽出 `runOptions.callTTL`、为了让 Publish 出口可确定性命中而加了 `beforePublish` 检查点；示例双工 handler 补了 `io.EOF` 判断，避免对端正常半关闭时被回一个 `ERROR(INTERNAL)` 帧——这一条是修 bug，不是补覆盖率。
 
-已知边界与缺点清单（诚实版）：design-notes.md §7；未做的优化（帧缓冲池化、小帧写合并、字段对齐重排）：design-notes.md §8。测试里抓到的 9 个真缺陷（每条都是一条设计教训的实证）：README「测试里抓到的真 bug」。
+已知边界与缺点清单在 design-notes.md §7，未做的优化（帧缓冲池化、小帧写合并、字段对齐重排）在 §8。测试里抓到的 9 个真缺陷（每条都是一条设计教训的实证）见 README「测试里抓到的真 bug」。
 
 ### 11.4 fuzz 冒烟门禁：把"恶意输入防护"从声明变成检查
 
@@ -527,7 +527,7 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 | 崩溃处理 | 失败即红，且 Go 自动把 crash 语料写进 `testdata/fuzz/<Target>/` | 提交这个文件就等于把一次性发现固化成永久回归用例，之后每次 `go test`（含种子语料）都会重放它 |
 | 空靶保护 | 发现不到靶直接失败并报错 | 靶名写错/包路径改动的失败模式必须是红的，不能是"0 靶 0 崩溃"的假绿 |
 
-**这一步每轮到底搜了多少空间**（本机 i9-10880H / 12 fuzz worker，取 `-fuzz` 自报的 execs 计数；同一命令两次实测如下）：
+这一步每轮到底搜了多少空间（本机 i9-10880H / 12 fuzz worker，取 `-fuzz` 自报的 execs 计数；同一命令两次实测如下）：
 
 | 靶 | 重载采样（20s 预算，1 分钟负载 ~115~150 / 12 核） | 轻载采样（15s 预算） | 每 exec 的主导成本 |
 | --- | --- | --- | --- |
@@ -537,13 +537,13 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 | `FuzzDecodeMeta` | —（未做双采） | 44.5 万 | 纯内存 JSON 解析：多数输入首块就报错或走小结构分配，没有帧解析那种"合法长度即 16MiB 缓冲"的变慢路径 |
 | `FuzzHandshakeJSON` | —（未做双采） | 49.3 万 | 纯内存：每 exec 两次 Unmarshal + 两次 Marshal + 两次协商，无网络无大缓冲 |
 
-**绝对数字为什么要列两次采样而不是一个值**：本机是共享容器，测这两组数时 1 分钟负载平均在 100~150（12 核），同一命令在轻载/重载之间差到 3 倍——`go test -fuzz` 的吞吐就是 CPU 供给的函数，跨机器引用单值没有意义（与 §11.2 的 ns/op 同理，波动更大；复现时把 `/proc/loadavg` 一起记）。后两行是 2026-09-27 加入靶时的单次采样（轻载，负载未随记），按本节自己的纪律只当量级看，留双采给下一次顺手跑。**跨两轮稳定的是相对关系**：`FuzzRawPeer` 比四个纯内存靶慢 3~6 倍，纯内存靶之间在噪声内持平。要对外说清一个量级：单次 CI 的搜索量是"十万次变异"。
+绝对数字为什么要列两次采样而不是一个值：本机是共享容器，测这两组数时 1 分钟负载平均在 100~150（12 核），同一命令在轻载/重载之间差到 3 倍——`go test -fuzz` 的吞吐就是 CPU 供给的函数，跨机器引用单值没有意义（与 §11.2 的 ns/op 同理，波动更大；复现时把 `/proc/loadavg` 一起记）。后两行是 2026-09-27 加入靶时的单次采样（轻载，负载未随记），按本节自己的纪律只当量级看，留双采给下一次顺手跑。跨两轮稳定的是相对关系：`FuzzRawPeer` 比四个纯内存靶慢 3~6 倍，纯内存靶之间在噪声内持平。要对外说清一个量级：单次 CI 的搜索量是"十万次变异"。
 
-**这个门禁证明不了什么**（避免过度宣称）：20s 的随机变异没有覆盖度保证，"CI 绿"只意味着这一轮变异没撞上已知不变量。真正的防线仍是靶内断言的不变量本身——把"任意字节不得 panic""解析∘编码 = 恒等""解压结果受上限约束"写成断言，fuzz 引擎只负责替人找反例；找到的概率低，不等于断言可以放松。这与 §11.1 覆盖率门禁是同一种哲学：**约束写成可执行检查，工具只提供搜索力**。
+这个门禁证明不了什么：20s 的随机变异没有覆盖度保证，"CI 绿"只意味着这一轮变异没撞上已知不变量。真正的防线仍是靶内断言的不变量本身——把"任意字节不得 panic""解析∘编码 = 恒等""解压结果受上限约束"写成断言，fuzz 引擎只负责替人找反例；找到的概率低，不等于断言可以放松。这与 §11.1 覆盖率门禁是同一种哲学：约束写成可执行检查，工具只提供搜索力。
 
 ### 11.5 一次 CI 自身的假绿：`(cached)` 让门禁不干活
 
-有两道门禁（`-race` 与覆盖率）一度全是"名义上存在"的：`actions/setup-go` 默认 `cache: true`（keyed on `go.sum`），会恢复 GOCACHE；而 `go test` 的结果缓存键覆盖测试二进制、环境与被测文件——**只改 README 或工作流时键不变，测试直接复用上次结果**。实测（本机复现，无需 CI）：
+有两道门禁（`-race` 与覆盖率）一度全是"名义上存在"的：`actions/setup-go` 默认 `cache: true`（keyed on `go.sum`），会恢复 GOCACHE；而 `go test` 的结果缓存键覆盖测试二进制、环境与被测文件——只改 README 或工作流时键不变，测试直接复用上次结果。实测（本机复现，无需 CI）：
 
 ```
 $ go test -race ./...        # 第一次：ok  github.com/cuihairu/jsonstream  32.320s
@@ -551,14 +551,14 @@ $ go test -race ./...        # 第二次：ok  github.com/cuihairu/jsonstream  (
 $ go test -coverprofile=c.out .   # 第二次：ok ... (cached) coverage: 100.0% of statements
 ```
 
-失败模式极其安静：绿灯照亮，什么都没跑。覆盖率门禁最危险——它会拿**上一次**的 profile 冒充这次的证据，恰好在一个"刚改了被测代码但 go.sum 没变"的提交上说"100%"（注意：改了 `.go` 文件二进制就变了，键会失效；真正的风险窗口是文档/注释/非 Go 输入变更，以及**本地**复现门禁时以为跑过其实没跑）。修法两条，都不复杂：
+失败模式极其安静：绿灯照亮，什么都没跑。覆盖率门禁最危险——它会拿上一次的 profile 冒充这次的证据，恰好在一个"刚改了被测代码但 go.sum 没变"的提交上说"100%"（注意：改了 `.go` 文件二进制就变了，键会失效；真正的风险窗口是文档/注释/非 Go 输入变更，以及本地复现门禁时以为跑过其实没跑）。修法两条，都不复杂：
 
 | 做法 | 效果 | 取舍 |
 | --- | --- | --- |
 | 测试/覆盖率步加 `-count=1` | 只废掉结果缓存，保留 GOMODCACHE/GOCACHE 的编译加速 | 首选：改动面最小，语义精确（我要的是"这次跑过"） |
 | `setup-go` 设 `cache: false` | 彻底不恢复 GOCACHE | 连编译缓存都丢，CI 慢十几秒，为一个测试语义问题付全价 |
 
-不受影响的另两步，理由各不相同，都实测过：`go test -bench` 的基准结果不进缓存（连跑两次都真跑 14s+）；`go test -fuzz` 的挖掘运行同理从不复用（连跑三次都各跑满 20s），而靶发现用的 `go test -list` 根本不执行测试。教训可以泛化：**任何"跑一下就算"的门禁，都要先问它在缓存命中的时候会做什么**——和 §11.4 的"逐包靶名发现"是同一类防守：门禁的失败模式必须是"红"，不能是"看起来绿"。
+不受影响的另两步，理由各不相同，都实测过：`go test -bench` 的基准结果不进缓存（连跑两次都真跑 14s+）；`go test -fuzz` 的挖掘运行同理从不复用（连跑三次都各跑满 20s），而靶发现用的 `go test -list` 根本不执行测试。教训可以泛化：任何"跑一下就算"的门禁，都要先问它在缓存命中的时候会做什么——和 §11.4 的"逐包靶名发现"是同一类防守：门禁的失败模式必须是"红"，不能是"看起来绿"。
 
 ## 12. 面试讲解的展开顺序建议
 

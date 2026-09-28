@@ -9,7 +9,7 @@ func Dial(ctx context.Context, addr string, cfg Config) (*Client, error)
 func NewServer(ln net.Listener, cfg Config) (*Server, error)
 ```
 
-- `Dial` 建立连接并完成握手（阻塞到 CONNACK）。**首连失败（网络不可达或握手被拒）立即返回错误**；连接成功后的断连才由内部循环自动重连（指数退避 + 抖动，受 `Config.Reconnect` 控制）。
+- `Dial` 建立连接并完成握手（阻塞到 CONNACK）。首连失败（网络不可达或握手被拒）立即返回错误；连接成功后的断连才由内部循环自动重连（指数退避 + 抖动，受 `Config.Reconnect` 控制）。
 - `NewServer` 创建服务端但不开始接受连接，调用 `Serve` 启动。
 
 ## Client
