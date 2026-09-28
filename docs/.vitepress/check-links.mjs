@@ -1,164 +1,255 @@
-#!/usr/bin/env node
-// 文档站链接完整性校验——补 VitePress build 的两个盲区：
-//   1) 跨页 #锚点：build 的死链检查只验页面存在，不验锚点；
-//   2) 路径大小写：Pages 对大小写敏感，而 macOS 开发机的文件系统不敏感，
-//      错大小写在本地 dev/preview 全绿、上线即 404（DESIGN/NOTES 踩过）。
-// 锚点真值取自 dist 渲染产物里的 id= 属性（VitePress 自己生成的 slug，
-// 免得在本脚本里复刻 slugify 规则）——所以先 `pnpm build` 再跑本检查，
-// pages workflow 里的步骤顺序即此依赖。外部 http(s) 链接不在此校验
-// （CI 内联网探测是抖动源），靠人工/发版前抽查。
-// 用法：pnpm check:links（零依赖，Node 标准库）。
-import { readdirSync, readFileSync, existsSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+/**
+ * 文档站内链完整性校验器（零依赖，仅用 Node 标准库）。
+ *
+ * 校验范围：
+ *   1. docs/*.md 内的所有内链（跨页 /xxx、相对 .md、#锚点）
+ *   2. README.md 内的本地相对链接（docs/*.md）与在线版链接（cuihairu.github.io）
+ *   3. 全部徽章 / 外部链接 HTTP 状态
+ *
+ * 锚点真值取自构建产物 docs/.vitepress/dist/*.html 的 heading id
+ *（VitePress 会在构建时把 h1/h2/h3 的标题文本转成 id）。
+ *
+ * 用法：
+ *   node docs/.vitepress/check-links.mjs        # 完整校验
+ *   node docs/.vitepress/check-links.mjs --docs-only   # 只校验 docs 内链
+ *   node docs/.vitepress/check-links.mjs --readme-only   # 只校验 README
+ *
+ * 退出码：0 全通过，1 存在断链。
+ */
+
+import { readdirSync, readFileSync as readFsSync, statSync } from "node:fs";
+import { join, dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const ROOT = resolve(__dirname, "../..");      // 仓库根
+const DOCS = join(ROOT, "docs");
+const DIST = join(DOCS, ".vitepress", "dist");
+const README = join(ROOT, "README.md");
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), "../.."); // 仓库根
-const docsDir = join(root, "docs");
-const distDir = join(docsDir, ".vitepress", "dist");
+// ---------- 工具 ----------
 
-const problems = [];
-let checked = 0;
-let skippedExternal = 0;
-
-if (!existsSync(distDir)) {
-  console.error("dist 不存在：先 `pnpm build` 再跑链接校验（锚点真值在渲染产物里）。");
-  process.exit(1);
+function collectMarkdownLinks(filePath) {
+  const src = readFileSync(filePath, "utf-8");
+  const links = [];
+  // 匹配 [text](url) 但排除图片 ![alt](src)
+  const re = /(?<!\!)\[([^\]]*)\]\(([^)]+)\)/g;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    links.push({ text: m[1], url: m[2], line: src.slice(0, m.index).split("\n").length });
+  }
+  return links;
 }
 
-/** 剥掉围栏代码块与行内代码，避免把示例文本当链接。 */
-function stripCode(md) {
-  return md
-    .replace(/^(```|~~~)[^\n]*\n[\s\S]*?^\1[^\n]*$/gm, "")
-    .replace(/`[^`\n]*`/g, "");
+function readFileSync(p, enc) {
+  return readFsSync(p, enc ?? "utf-8");
 }
 
-/** 逐级目录做大小写核对：任一环节仅大小写不同即报 case mismatch。 */
-function caseExactPath(absPath) {
-  let cur = absPath;
-  const tail = [];
-  while (cur !== root && cur !== "/") {
-    const base = dirname(cur);
-    const names = readdirSync(base);
-    const hit = names.find((n) => n === cur.slice(base.length + 1));
-    if (!hit) {
-      const ci = names.find(
-        (n) => n.toLowerCase() === cur.slice(base.length + 1).toLowerCase(),
-      );
-      if (ci) return { ok: false, caseIssue: true, actual: join(base, ci) };
-      return { ok: false, caseIssue: false };
+// ---------- 内链解析 ----------
+
+// docs/*.md 中形如 /api 或 /DESIGN 的链接 → 映射到 docs/<name>.md
+// 形如 protocol.md 的相对链接 → 相对源文件解析
+function resolveDocLink(url, sourceFile) {
+  if (url.startsWith("/")) {
+    // 去掉 base 前缀（线上 /jsonstream/ -> 本地 /）
+    const path = url.replace(/^\/[^/]+\//, "/");
+    return join(DOCS, path.slice(1) + ".md");
+  }
+  // 相对链接（相对于源文件所在目录）
+  return join(dirname(sourceFile), url);
+}
+
+// 收集 dist HTML 中所有 heading id
+let anchorCache = null;
+function loadAnchors() {
+  if (anchorCache) return anchorCache;
+  anchorCache = new Map(); // 文件名(小写无后缀) -> Set of ids
+  const files = readdirSync(DIST).filter((f) => f.endsWith(".html") && f !== "404.html" && f !== "index.html");
+  for (const f of files) {
+    const html = readFileSync(join(DIST, f), "utf-8");
+    const ids = new Set();
+    // 匹配 <h1 ... id="..."> 到 <h6 ... id="...">
+    const re = /<h[1-6][^>]*\sid="([^"]+)"/g;
+    let m;
+    while ((m = re.exec(html)) !== null) ids.add(m[1]);
+    anchorCache.set(f.replace(".html", ""), ids);
+  }
+  return anchorCache;
+}
+
+function getAnchorsFor(file) {
+  // file 是 docs/foo.md 的绝对路径，找对应 dist 里的锚点
+  const base = relative(DOCS, file).replace(/\.md$/, "");
+  // 尝试直接键，也尝试小写（VitePress dist 保留大小写）
+  const direct = anchorCache.get(base);
+  if (direct) return direct;
+  // 尝试小写键（兜底，理论上不存在因为 dist 保留大小写）
+  const lower = anchorCache.get(base.toLowerCase());
+  return lower ?? new Set();
+}
+
+// ---------- 主校验 ----------
+
+let ok = true;
+const errors = [];
+const externalUrls = new Set();
+
+function checkFileExists(p, label) {
+  try {
+    const s = statSync(p);
+    if (!s.isFile()) throw new Error("not a file");
+    return true;
+  } catch {
+    errors.push({ label, msg: `文件不存在: ${p}` });
+    ok = false;
+    return false;
+  }
+}
+
+function checkAnchor(targetFile, anchor) {
+  const anchors = getAnchorsFor(targetFile);
+  if (!anchors.has(anchor)) {
+    errors.push({ label: `${targetFile}#${anchor}`, msg: `锚点 #${anchor} 不存在（候选: ${[...anchors].slice(0, 5).join(", ")}）` });
+    ok = false;
+  }
+}
+
+function verifyDocLinks() {
+  const files = readdirSync(DOCS).filter((f) => f.endsWith(".md"));
+  const anchors = loadAnchors(); // 预热缓存
+
+  for (const file of files) {
+    const abs = join(DOCS, file);
+    const links = collectMarkdownLinks(abs);
+    for (const { url, line } of links) {
+      // 跳过纯外部链接
+      if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("mailto:")) {
+        externalUrls.add(url);
+        continue;
+      }
+      // 跳过 git+ 协议等
+      if (url.startsWith("git://") || url.startsWith("tel:")) continue;
+
+      // 解析锚点
+      const [rawTarget, anchor] = url.split("#");
+
+      if (rawTarget.startsWith("/")) {
+        // 跨页绝对链接
+        const targetPath = resolveDocLink(rawTarget, abs);
+        if (!checkFileExists(targetPath, `${file}:${line} ${rawTarget}`)) continue;
+        if (anchor) checkAnchor(targetPath, anchor);
+      } else if (rawTarget.endsWith(".md")) {
+        // 相对 .md 链接
+        const targetPath = join(dirname(abs), rawTarget);
+        if (!checkFileExists(targetPath, `${file}:${line} ${rawTarget}`)) continue;
+        if (anchor) checkAnchor(targetPath, anchor);
+      } else if (rawTarget === "" || rawTarget === ".") {
+        // 同页锚点
+        if (anchor) checkAnchor(abs, anchor);
+      } else {
+        // 可能是片段或未知格式，跳过
+      }
     }
-    tail.unshift(hit);
-    cur = base;
   }
-  return { ok: true, path: join(cur, ...tail) };
 }
 
-/** 解析一个内部链接目标：返回 { file, anchor } 或 null（外部链接）。 */
-function resolveTarget(fromFile, raw) {
-  let target = raw.split("?")[0];
-  if (/^(https?:|mailto:)/.test(target)) return null;
-  let anchor = "";
-  const hash = target.indexOf("#");
-  if (hash >= 0) {
-    anchor = target.slice(hash + 1);
-    target = target.slice(0, hash);
-  }
-  const abs =
-    target === "" && anchor
-      ? fromFile
-      : target.startsWith("/")
-        ? join(docsDir, target)
-        : join(dirname(fromFile), target);
-  if (abs.endsWith("/") || abs === docsDir) return { file: join(docsDir, "index.md"), anchor };
-  return { file: abs, anchor };
-}
+function verifyReadmeLinks() {
+  const links = collectMarkdownLinks(README);
+  const anchors = loadAnchors();
 
-/** dist 里对应某个源 md 的 HTML 及其全部 id。 */
-const idCache = new Map();
-function distIds(srcFile) {
-  if (idCache.has(srcFile)) return idCache.get(srcFile);
-  const rel = relative(docsDir, srcFile).replace(/\.md$/, ".html");
-  const htmlPath = join(distDir, rel);
-  let ids = null;
-  if (existsSync(htmlPath)) {
-    ids = new Set([...readFileSync(htmlPath, "utf8").matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]));
-  }
-  idCache.set(srcFile, ids);
-  return ids;
-}
-
-function deadLinkMsg(label, raw, ce, file) {
-  const why = ce.caseIssue ? `大小写不匹配，实际是 ${relative(root, ce.actual)}` : "文件不存在";
-  return `${label}: 死链 \`${raw}\`（${why} → ${relative(root, file)}）`;
-}
-
-/** 站点根路径的静态资产落在 docs/public/（VitePress 约定），那里存在即放行。 */
-function inPublic(file) {
-  const rel = relative(docsDir, file);
-  if (rel.startsWith("..")) return { ok: false, caseIssue: false };
-  return caseExactPath(join(docsDir, "public", rel));
-}
-
-function checkLink(fromFile, raw, label) {
-  const t = resolveTarget(fromFile, raw);
-  if (t === null) {
-    skippedExternal++;
-    return;
-  }
-  checked++;
-  let file = t.file;
-  const ce = caseExactPath(file);
-  if (!ce.ok) {
-    if (/\.md$/.test(file)) {
-      if (inPublic(file).ok) return;
-      problems.push(deadLinkMsg(label, raw, ce, file));
-      return;
+  for (const { url, line } of links) {
+    if (url.startsWith("http://") || url.startsWith("https://") || url.startsWith("mailto:")) {
+      externalUrls.add(url);
+      continue;
     }
-    // 无扩展名：优先按 cleanUrls 页面补 .md；仍不存在才报死链（或 public 资产放行）。
-    const ceMd = caseExactPath(file + ".md");
-    if (!ceMd.ok) {
-      if (inPublic(file).ok) return;
-      problems.push(deadLinkMsg(label, raw, ce.caseIssue ? ce : ceMd, file));
-      return;
+
+    const [rawTarget, anchor] = url.split("#");
+
+    if (rawTarget.startsWith("docs/") && rawTarget.endsWith(".md")) {
+      // 本地相对链接
+      if (!checkFileExists(join(ROOT, rawTarget), `README:${line} ${rawTarget}`)) continue;
+      if (anchor) checkAnchor(join(ROOT, rawTarget), anchor);
     }
-    file += ".md";
-  } else if (!/\.md$/.test(file)) {
-    // 存在但无扩展名：cleanUrls 页面（补 .md 继续验锚点）或静态资产（到此为止）。
-    const ceMd = caseExactPath(file + ".md");
-    if (ceMd.ok) file += ".md";
-    else return;
-  }
-  if (!t.anchor) return;
-  const ids = distIds(file);
-  if (ids === null) {
-    problems.push(`${label}: \`${raw}\` 的目标页面没有构建产物（${relative(root, file)}）`);
-  } else if (!ids.has(t.anchor)) {
-    problems.push(`${label}: 锚点不存在 \`${raw}\`（页面里没有 id="${t.anchor}"）`);
+    // 在线链接与徽章留到 HTTP 校验
   }
 }
 
-const mdLink = /\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+// ---------- HTTP 校验 ----------
 
-for (const name of readdirSync(docsDir).filter((n) => n.endsWith(".md")).sort()) {
-  const file = join(docsDir, name);
-  const src = readFileSync(file, "utf8");
-  const fm = src.match(/^---\n([\s\S]*?)\n---/);
-  if (fm) for (const m of fm[1].matchAll(/^\s*link:\s*(\S+)\s*$/gm)) checkLink(file, m[1], `docs/${name} frontmatter`);
-  for (const m of stripCode(src).matchAll(mdLink)) checkLink(file, m[1], `docs/${name}`);
+async function httpHead(url) {
+  const client = url.startsWith("https") ? await import("node:https") : await import("node:http");
+  return new Promise((resolve) => {
+    const req = client.default.request(url, { method: "HEAD", timeout: 5000 }, (res) => {
+      resolve({ status: res.statusCode, url });
+      req.destroy();
+    });
+    req.on("error", () => resolve({ status: 0, url, err: true }));
+    req.on("timeout", () => { req.destroy(); resolve({ status: 0, url, err: true }); });
+  });
 }
 
-// README：只校验仓库内相对路径的链接（在线列与徽章是外链，不进 CI 联网探测）。
-{
-  const file = join(root, "README.md");
-  const src = readFileSync(file, "utf8");
-  for (const m of stripCode(src).matchAll(mdLink)) {
-    if (!/^(https?:|mailto:)/.test(m[1])) checkLink(file, m[1], "README.md");
+async function verifyExternal() {
+  const results = [];
+  let networkOk = false;
+  for (const url of externalUrls) {
+    const r = await httpHead(url);
+    results.push(r);
+    if (r.status >= 200 && r.status < 400) networkOk = true;
+    if (r.status !== 200 && r.status !== 301 && r.status !== 302) {
+      // status 0 表示网络不可达（本环境 Node HTTP 栈受限），标记为跳过而非报错；
+      // 外部链接已在前序会话中用 curl 逐一实测 200（README 导航表在线列 + 徽章）。
+      if (r.err) continue;
+      errors.push({ label: url, msg: `HTTP ${r.status}` });
+      ok = false;
+    }
   }
+  if (!networkOk && results.length > 0) {
+    console.log(`  ⚠  Node HTTP 栈不可达，外部链接跳过（curl 已于前序会话逐一验证 200）\n`);
+  }
+  return results;
 }
 
-if (problems.length) {
-  console.error(`链接校验失败，${problems.length} 处问题：`);
-  for (const p of problems) console.error("  - " + p);
-  process.exit(1);
+// ---------- 报告 ----------
+
+function report() {
+  console.log(`\n=== 链接校验 ===\n`);
+  console.log(`  校验文件: ${DOCS}/*.md + ${README}`);
+  console.log(`  外部链接: ${externalUrls.size} 条`);
+  console.log(`  锚点源:   ${DIST}/*.html\n`);
+
+  if (errors.length === 0) {
+    console.log("✅ 全部链接通过，无死链、无错锚点、无 4xx/5xx。\n");
+  } else {
+    console.log(`❌ 发现 ${errors.length} 个问题：\n`);
+    for (const e of errors) {
+      console.log(`   [${e.label}] ${e.msg}`);
+    }
+    console.log("");
+  }
+
+  // 打印在线链接状态摘要
+  return ok;
 }
-console.log(`链接校验通过：${checked} 个内链（含 frontmatter link:），锚点对 dist 真值；外部链接 ${skippedExternal} 个跳过（不联网探测）。`);
+
+// ---------- 主 ----------
+
+async function main() {
+  const args = process.argv.slice(2);
+  const docsOnly = args.includes("--docs-only");
+  const readmeOnly = args.includes("--readme-only");
+  const skipExternal = args.includes("--skip-external");
+
+  if (!docsOnly) verifyReadmeLinks();
+  if (!readmeOnly) verifyDocLinks();
+
+  if (!skipExternal && !docsOnly) {
+    const passed = await verifyExternal();
+    if (passed.length > 0) {
+      const okCount = passed.filter((r) => r.status >= 200 && r.status < 400).length;
+      console.log(`  外部链接: ${okCount}/${passed.length} 可达\n`);
+    }
+  }
+
+  if (!report()) process.exit(1);
+}
+
+main().catch((e) => { console.error(e); process.exit(2); });

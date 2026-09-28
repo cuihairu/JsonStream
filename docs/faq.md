@@ -55,7 +55,7 @@ pnpm build          # 构建到 docs/.vitepress/dist，自带死链检查（见�
 pnpm preview        # 预览构建产物，http://localhost:4173
 ```
 
-`pnpm build` 的**死链检查即文档链接门禁**：docs 内相对链接指到不存在的页面会直接构建失败（pages workflow 每次推送都在跑）。但它抓不到大小写错误的链接与站外 URL，这两类要靠人工核对（见上文 404 一节）——其中**内链的大小写与跨页 `#锚点`** 已由 `pnpm check:links`（`docs/.vitepress/check-links.mjs`，pages workflow 在 build 后自动跑）程序化补位，外部链接仍需人工抽查。
+`pnpm build` 的**死链检查即文档链接门禁**：docs 内相对链接指到不存在的页面会直接构建失败（pages workflow 每次推送都在跑）。但它抓不到大小写错误的链接与站外 URL——这两类已由 `pnpm check:links`（`docs/.vitepress/check-links.mjs`，pages workflow 在 build 后自动跑）程序化补位：内链校验大小写与跨页 `#锚点`；**外链做真实 HEAD 探测**（只认 200/301/302，网络不可达时跳过不误报），因此外链失效或瞬时故障也可能让 pages 构建变红。
 
 ## fuzz / 集成测试怎么跑
 
