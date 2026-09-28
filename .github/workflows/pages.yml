@@ -37,6 +37,11 @@ jobs:
       # 这一步同时是文档链接的 CI 门禁。
       - name: Build site
         run: pnpm build
+      # build 的死链检查抓不到的两类由本步补位：跨页 #锚点（对 dist 渲染产物的
+      # id= 真值校验）与路径大小写（Pages 敏感、macOS 开发机不敏感，DESIGN/NOTES
+      # 踩过）。依赖上一步 build 产物，故必须排在其后。
+      - name: Check doc links
+        run: pnpm check:links
       # PR 只校验不部署：产物留给 push main 的部署 job
       - name: Upload Pages artifact
         if: github.event_name != 'pull_request'
