@@ -53,7 +53,7 @@
 | 支持心跳机制 | 完整支持：双向 PING/PONG，读空闲 1.5× 间隔判死 | [protocol.md](protocol.md) §7.2、transport.go:148 |
 | 以 JSON 为交互数据 | 完整支持：payload 语义恒为 UTF-8 JSON；路由/主题在 Metadata | [protocol.md](protocol.md) §5 |
 | 二进制帧 | 完整支持：14B 定长头 + 32 位大端长度前缀 | [protocol.md](protocol.md) §3、frame.go |
-| 支持参数化是否启用压缩 | 完整支持：握手协商生效，每帧 Flags 如实标注，载荷 ≥64B 才实际压 | [protocol.md](protocol.md) §6、transform.go:74 |
+| 支持参数化是否启用压缩 | 完整支持：握手协商生效，每帧 Flags 声明，载荷 ≥64B 才实际压 | [protocol.md](protocol.md) §6、transform.go:74 |
 | 支持可选是否启用加密 | 完整支持：AES-256-GCM + 32B PSK，先压后加，每帧独立标注 | [protocol.md](protocol.md) §6、transform.go |
 | 支持请求/响应模式 | 完整支持：REQUEST→RESPONSE，响应帧自带终结语义 | [protocol.md](protocol.md) §7.4 |
 | 支持发布/订阅模式 | 完整支持：SUBSCRIBE/SUBACK/PUBLISH，主题是双向命名空间 | [protocol.md](protocol.md) §7.8 |
