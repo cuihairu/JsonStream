@@ -92,4 +92,4 @@ cfg.Key = key32     // 32 字节预共享密钥
 cfg.Credit = 64     // 连接级信用窗口，生效值取双方最小
 ```
 
-库与协议的全貌：上手与五种模式见 [getting-started.md](/getting-started)，全部公开 API 见 [api.md](/api)，架构与取舍见 [DESIGN.md](/DESIGN)，协议逐字段定义见 [protocol.md](/protocol)，与 WebSocket 的能力边界见 [websocket-comparison.md](/websocket-comparison)，构建/测试/部署的常见问题见 [faq.md](/faq)。
+库与协议的全貌：上手与五种模式见 [getting-started.md](/getting-started)，全部公开 API 见 [api.md](/api)，帧/变换/端到端的基准实测见 [benchmarks.md](/benchmarks)，架构与取舍见 [DESIGN.md](/DESIGN)，协议逐字段定义见 [protocol.md](/protocol)，与 WebSocket 的能力边界见 [websocket-comparison.md](/websocket-comparison)，构建/测试/部署的常见问题见 [faq.md](/faq)。

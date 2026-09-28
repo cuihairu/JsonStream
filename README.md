@@ -18,6 +18,7 @@
 | --- | --- |
 | [上手指南](docs/getting-started.md) | [getting-started](https://cuihairu.github.io/jsonstream/getting-started) |
 | [API 参考](docs/api.md) | [api](https://cuihairu.github.io/jsonstream/api) |
+| [基准实测](docs/benchmarks.md) | [benchmarks](https://cuihairu.github.io/jsonstream/benchmarks) |
 | [故障排查 / FAQ](docs/faq.md) | [faq](https://cuihairu.github.io/jsonstream/faq) |
 | [协议规范](docs/protocol.md) | [protocol](https://cuihairu.github.io/jsonstream/protocol) |
 | [题目要求](docs/interview-requirements.md) | [interview-requirements](https://cuihairu.github.io/jsonstream/interview-requirements) |

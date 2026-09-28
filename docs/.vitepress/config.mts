@@ -36,6 +36,7 @@ export default defineConfig({
           items: [
             { text: "上手指南", link: "/getting-started" },
             { text: "API 参考", link: "/api" },
+            { text: "基准实测", link: "/benchmarks" },
             { text: "故障排查 / FAQ", link: "/faq" },
           ],
         },
