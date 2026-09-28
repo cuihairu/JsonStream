@@ -2,3 +2,8 @@
 # esbuild 的 postinstall 负责落位平台二进制，vite 构建必需，显式放行。
 allowBuilds:
   esbuild: true
+# Dependabot 4 条告警（vite GHSA-fx2h-pf6j-xcff/4w7w-66w2-5vf9/v6wh-96g9-6wx3 + esbuild GHSA-67mh-4wv8-2f99，
+# 全部 development scope）的修复线：vite >=6.4.3（自带 esbuild ^0.25.0 >= 0.24.3）。
+# vitepress 1.6.4 是 1.x 最新、peer 只认 vite ^5，故用 overrides 强制提升（build 实测兼容）。
+overrides:
+  vite: ^6.4.3
