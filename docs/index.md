@@ -42,7 +42,7 @@ features:
     linkText: 查阅 API
   - icon: 🔄
     title: 与 WebSocket 对照
-    details: WS 有我们没有的（分片、浏览器可达、TLS 承载），WS 没有我们内建的（req/res、pub/sub、背压、恢复）——每条附代码与文档依据。
+    details: WS 有我们没有的（浏览器可达、TLS 承载），分片已定稿为独立 FRAGMENT 帧型（实现落地中），WS 没有我们内建的（req/res、pub/sub、背压、恢复）——每条附文档依据。
     link: /websocket-comparison
     linkText: 逐条对照
   - icon: 🧵

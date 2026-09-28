@@ -6,7 +6,7 @@
 
 ### ① 分片传输（FIN / continuation，任意大小重组）
 
-WebSocket 用 FIN 位 + continuation opcode 把一条逻辑消息拆成任意多帧，接收端重组（RFC 6455 §5.4）。JsonStream **单帧上限 16 MiB**（frame.go:31 `MaxPayloadSize`，超限断开防 OOM），FIN 分片明确不做——[design-notes.md](design-notes.md) §1.2 的决策：16 MiB 内一帧装得下，分片重组状态机是纯成本。**诚实标注**：对"任意大小单体消息"这是真实缺口，实现路线（FIN + continuation 重组状态机）与现状详见 [interview-requirements.md](interview-requirements.md) 的分帧三条、扩展路径见 [protocol.md](protocol.md) §10。
+WebSocket 用 FIN 位 + continuation opcode 把一条逻辑消息拆成任意多帧，接收端重组（RFC 6455 §5.4）。JsonStream 的对应能力**已定稿、形式不同**：独立 `FRAGMENT` 帧类型（0x10）+ `FlagFragmented` 标志位（[protocol.md](protocol.md) §3.4）——变换后超过单帧上限（16 MiB）的消息自动拆成连续 chunk 运行，重组总量以 `MaxMessageSize`（默认 64 MiB）为帽。与 WebSocket 的差异是形式而非能力：续段不带元数据与变换标志（只随开帧走一次）、运行不可穿插由唯一写循环保证、接收端因此无需块序号；WebSocket 的重组状态机则为浏览器流式解析设计，两者各取所需。**如实标注**：规范已定稿，Go 参考实现的分片代码在落地中——main 分支当前版本对 `FlagFragmented` 帧按保留位违规断开，互通须等实现合入；两次决策（原「不做」与翻案）的理由都留档在 [design-notes.md](design-notes.md) §1.2，逐条现状见 [interview-requirements.md](interview-requirements.md) 的分帧三条。
 
 ### ② 浏览器原生可达
 

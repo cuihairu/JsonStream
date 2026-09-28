@@ -39,7 +39,7 @@
 4. **背压归属**：传输层窗口（TCP/HTTP-2，按字节）管的是链路；应用层 credit（按条数）管的才是"我还没消费完"；租约（RSocket LEASE，按时间）管的是速率不是在途量。本协议选 credit、连接级、**默认关闭**——它是全协议唯一反向影响应用并发模型的机制，不该默认强加（[design-notes.md](design-notes.md) §5）。
 5. **状态机复杂度换功能**：每个"功能"都要一个常驻状态机养着（分片重组、变长解码、掩码往返、恢复队列）。本协议 v1 把解码路径做成无状态两段读（定长头 + 长度前缀的直接红利：可 fuzz、可任意丢帧重入），全协议唯一有状态组件是断线恢复的保留队列。
 
-对照本项目的四个标志性取舍：**14B 帧头账目**（§3.2：Magic+Version 是自付的保险费）、**credit 可选背压**（§7.9）、**单帧 16 MiB 不做 FIN 分片**（§10，代价在 [interview-requirements.md](interview-requirements.md) 如实标注为生产化缺口）、**先压后加不可逆顺序**（§6）。
+对照本项目的四个标志性取舍：**14B 帧头账目**（§3.2：Magic+Version 是自付的保险费）、**credit 可选背压**（§7.9）、**单帧 16 MiB + 大消息分片**（§3.4：独立 FRAGMENT 帧型换掉 FIN+continuation，重组帽 MaxMessageSize 默认 64 MiB；实现现状在 [interview-requirements.md](interview-requirements.md) 如实标注）、**先压后加不可逆顺序**（§6）。
 
 ## 4. 市面常见协议横评
 
@@ -57,7 +57,7 @@
 - **优点**：**浏览器原生可达**（`new WebSocket()` 是浏览器唯一的标准全双工通道）；穿透代理/防火墙能力强；生态与库覆盖全语言。
 - **缺点**：只有"一条连接上的无序消息"——请求/响应关联、订阅、流式、背压信令、断线恢复**全部要应用层自造**；一连接无多路复用语义。
 - **适用场景**：浏览器实时应用（聊天、行情、协同）。
-- **对 JsonStream 的参照**：帧式心跳（PING/PONG + 空闲超时）与长度前缀分帧的惯例借鉴；变长长度、FIN 分片、客户端掩码三点显式不做（各条理由与逐项能力对照见 [websocket-comparison.md](websocket-comparison.md)）。
+- **对 JsonStream 的参照**：帧式心跳（PING/PONG + 空闲超时）与长度前缀分帧的惯例借鉴；变长长度、客户端掩码两点显式不做，FIN 分片换形为独立 FRAGMENT 帧型（protocol §3.4；各条理由与逐项能力对照见 [websocket-comparison.md](websocket-comparison.md)）。
 
 ### 4.3 RSocket
 

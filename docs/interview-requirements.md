@@ -41,8 +41,8 @@
 题面「高性能」组最后三条围绕同一件事：TCP 字节流上如何承载大数据量。三者现状不同，分开说：
 
 - **支持合并包之后解包 —— 已完整覆盖**。TCP 字节流的粘包/半包正是本协议分帧设计的正面战场：14B 定长头 + 32 位大端长度前缀，解码端 `io.ReadFull` 两段读（先读满头、再按长度读满载荷），`transport.readLoop` 外层再包一层 16 KiB bufio。**粘包**（多帧挤在一次读里）由缓冲批量取字节解决，**半包**（一帧分多次到达）由 ReadFull 内部循环消化——两个机制职责不同、不可互替。代码位置：frame.go:168（ReadFrame）、transport.go:175（readLoop）；专节讨论见 [NOTES.md](NOTES.md) §3、[DESIGN.md](DESIGN.md) §7。
-- **支持分包传输 / 分片 —— 已识别的生产化缺口，本轮不做**。当前设计是单帧 16 MiB 上限（frame.go:31，超限直接断开防 OOM）+ 载荷 ≥ 64B 起压缩（transform.go:17）。WebSocket 式的 FIN 位分片重组**明确不做**——这是 [design-notes.md](design-notes.md) §1.2 的架构决策：16 MiB 内一帧装得下，省掉一个分片重组状态机。生产环境若确需任意大小消息，分片是必须补的能力；实现路线一句话：FIN 位 + continuation 帧的重组状态机（可比 RFC 6455 §5.4），作为协议 v2 的独立议题（扩展路径见 [protocol.md](protocol.md) §10）。本轮**不实现**，此处如实标注为缺口而非功能。
-- **分包传输（大数据量场景）**——与上一条同指：当前答案「单帧 16 MiB + 压缩」覆盖了绝大多数 JSON 业务消息的体量，超出 16 MiB 的单体消息不在 v1 承诺范围内。
+- **支持分包传输 / 分片 —— 规范已定稿，实现落地中**。分片已写进单一事实源（[protocol.md](protocol.md) §3.4）：`FRAGMENT` 帧类型（0x10）+ `FlagFragmented` 标志位，变换后超单帧上限（16 MiB）的消息自动拆成连续 chunk 运行，重组总量帽 `MaxMessageSize`（默认 64 MiB），运行不可穿插故无需块序号，资源防线（总量/并发重组数/停滞超时）全部以断开收场。这是对早期「16 MiB 内一帧装得下、省掉状态机」决策的**正式翻案**——生产场景不能「包体过大就拒传」；两次决策的理由都留档在 [design-notes.md](design-notes.md) §1.2。**如实标注**：Go 参考实现的分片代码尚未合入 main——当前版本收到 `FlagFragmented` 帧按保留位违规断开；实现合入后本条与 [websocket-comparison.md](websocket-comparison.md) §① 同步转为「已覆盖」。
+- **分包传输（大数据量场景）**——与上一条同指：规范口径见 [protocol.md](protocol.md) §3.4；16 MiB 内的消息不受分片影响（单帧直发，编码与历史逐字节一致），超出部分在实现合入 main 前仍不可用。
 
 ### 其余各条逐项对照
 

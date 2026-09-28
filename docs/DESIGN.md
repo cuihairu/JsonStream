@@ -13,7 +13,7 @@
 3. **每个"可选能力"真的是可选**——关闭压缩/加密/背压/恢复时，不该为它们付任何运行时代价；
 4. **对恶意与错误输入有界**——任何对端行为都不能把本端内存打爆或让 goroutine 泄漏。
 
-非目标（同样重要，写进 protocol.md §10）：分片重组、变长头、精确一次投递、密钥分发、TLS 替代。
+非目标（同样重要，写进 protocol.md §10）：变长头、精确一次投递、密钥分发、TLS 替代。分片重组原在非目标清单里，v0.1.x 翻案为正式能力（protocol.md §3.4：独立 FRAGMENT 帧型 + FlagFragmented 位，实现落地中）。
 
 ## 2. 整体架构
 
@@ -445,7 +445,7 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 
 ## 10. 设计决策清单（备选方案与放弃理由）
 
-> 协议层决策（帧头为什么 14B、为什么不做 FIN 分片/MASK/变长长度、Flags 合并请求入口、credit vs LEASE vs 滑动窗口、Metadata 分离、先压后加）的完整论证见 [design-notes.md](design-notes.md) §1–§5，此处只列实现层决策。
+> 协议层决策（帧头为什么 14B、FIN 分片为何换形为独立 FRAGMENT 帧型、MASK/变长长度为何不做、Flags 合并请求入口、credit vs LEASE vs 滑动窗口、Metadata 分离、先压后加）的完整论证见 [design-notes.md](design-notes.md) §1–§5，此处只列实现层决策。
 
 - **D1 共用 endpoint 抽象**（§5.3）。备选：客户端/服务端两套调度器——放弃理由：双工与 pub/sub 要求两侧逻辑对称，两套实现必然漂移；现状代价是 client 侧带着三个 nil 钩子的空分支。
 - **D2 读写双循环 + 每流执行 goroutine**（§6.1）。备选：单 goroutine 串行分发（慢 handler 队头阻塞心跳）、固定 worker 池（背压阻塞占满池）。选中方案以 goroutine 数量换取消语义的干净。
