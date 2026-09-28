@@ -4,7 +4,7 @@ layout: home
 hero:
   name: JsonStream
   text: 一道面试题衍生的 TCP JSON 帧协议库
-  tagline: 基于自定义二进制帧协议承载 JSON 业务数据——一条 TCP 连接多路复用请求/响应、流式、双工、单向与发布/订阅，内建心跳、断线恢复、可选压缩/加密与 credit 背压。纯标准库 Go 参考实现，零第三方依赖；协议规范语言无关，其他语言实现规划中。
+  tagline: 自定义二进制帧协议承载 JSON，一条 TCP 连接上跑请求/响应、流式、双工、单向、发布/订阅五种交互。心跳、断线恢复、压缩加密、credit 背压都在协议内，不靠应用层自造。Go 参考实现纯标准库、零第三方依赖；协议规范语言无关，其他语言实现规划中。
   image:
     src: /logo.svg
     alt: JsonStream
@@ -22,17 +22,17 @@ hero:
 features:
   - icon: 🚀
     title: 上手指南
-    details: 从 go get 到五种交互模式跑通一遍：请求/响应、流式、双工、单向、发布/订阅，全部对照真实 API，可直接运行。
+    details: 从 go get 到五种交互模式跑通一遍，每段代码对照真实 API，可直接运行。
     link: /getting-started
     linkText: 开始使用
   - icon: 📋
     title: 面试题要求
-    details: 题面原文原样分组归档，逐条对照实现现状——完成即标注依据，取舍即说明理由，不夸大。
+    details: 题面原文分组归档，逐条对照实现现状：完成了标依据，做了取舍就说理由。
     link: /interview-requirements
     linkText: 题面与现状
   - icon: 📐
     title: 协议规范
-    details: 语言无关的单一事实源：帧格式逐字段、握手协商、交互原语、错误码表、变换管线、背压与恢复——只拿到这一份文档就应能写出可互通的实现。
+    details: 语言无关的单一事实源：帧格式逐字段、握手协商、交互原语、错误码表、变换管线、背压与恢复。只拿这一份就应能写出可互通的实现。
     link: /protocol
     linkText: 阅读规范
   - icon: 📚
@@ -42,7 +42,7 @@ features:
     linkText: 查阅 API
   - icon: 🔄
     title: 与 WebSocket 对照
-    details: WS 有我们没有的（浏览器可达、TLS 承载），分片已定稿为独立 FRAGMENT 帧型（实现落地中），WS 没有我们内建的（req/res、pub/sub、背压、恢复）——每条附文档依据。
+    details: WS 有我们没有的（浏览器原生可达、TLS 一等承载），也有没有我们内建的（req/res、pub/sub、背压、恢复）。分片已定稿为独立 FRAGMENT 帧型，实现落地中。每条对照附文档依据。
     link: /websocket-comparison
     linkText: 逐条对照
   - icon: 🧵
@@ -62,7 +62,7 @@ features:
     linkText: 复习考点
   - icon: 🔧
     title: 故障排查 / FAQ
-    details: Pages 大小写 404、base 与部署链、pnpm 12 构建脚本放行、fuzz/集成测试命令、codecov 门禁逐项解读——全部对到仓库实际配置。
+    details: Pages 大小写 404、base 与部署链、pnpm 12 构建脚本放行、fuzz/集成测试命令、codecov 门禁解读，都对到仓库实际配置。
     link: /faq
     linkText: 查 FAQ
 ---

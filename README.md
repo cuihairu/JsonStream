@@ -10,7 +10,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
-基于自定义二进制帧协议承载 JSON 业务数据——一条 TCP 连接多路复用请求/响应、流式、双工、单向与发布/订阅，内建心跳、断线恢复、可选压缩/加密与 credit 背压。纯标准库 Go 参考实现，零第三方依赖；协议规范语言无关，其他语言实现规划中。
+自定义二进制帧协议承载 JSON，一条 TCP 连接上跑请求/响应、流式、双工、单向、发布/订阅五种交互。心跳、断线恢复、压缩加密、credit 背压都在协议内，不靠应用层自造。Go 参考实现纯标准库、零第三方依赖；协议规范语言无关，其他语言实现规划中。
 
 - **协议规范（语言无关，跨语言实现的单一事实源）**：[docs/protocol.md](docs/protocol.md)——只拿到这一份文档就应能写出可互通的其他语言实现；Go 实现已可用（`go get github.com/cuihairu/jsonstream`，[v0.1.0 发布说明](https://github.com/cuihairu/jsonstream/releases/tag/v0.1.0)），Python/Rust 等其他语言实现规划中。
 - **题目要求**：[docs/interview-requirements.md](docs/interview-requirements.md)——题面原文分组与逐条实现现状（含分帧三条的如实标注）。
@@ -32,9 +32,9 @@
 
 ## 设计与知识点
 
-本节讲协议设计的逐点依据：帧格式、交互模型、元数据分离、心跳、断线恢复、压缩加密、背压、pub/sub 混用与实测教训。与 WebSocket 的能力对照，摘成三行——
+本节讲协议设计的逐点依据：帧格式、交互模型、元数据分离、心跳、断线恢复、压缩加密、背压、pub/sub 混用与实测教训。与 WebSocket 的能力对照，摘成三行：
 
-- WS 有、本协议没有或显式不做：浏览器原生可达、TLS 一等承载与 443 复用、子协议/扩展协商、文本/二进制 opcode 区分（客户端 Masking 则明确不需要——raw TCP 直连没有那个威胁模型）。分片传输已从「不做」名单移出：规范定稿为独立 `FRAGMENT` 帧类型（见下）。
+- WS 有、本协议没有或显式不做：浏览器原生可达、TLS 一等承载与 443 复用、子协议/扩展协商、文本/二进制 opcode 区分（客户端 Masking 则明确不需要，raw TCP 直连没有那个威胁模型）。分片传输已从「不做」名单移出：规范定稿为独立 `FRAGMENT` 帧类型（见下）。
 - WS 标准没有、本协议内建：请求/响应、发布/订阅、流式、credit 背压、断线恢复、Stream ID 多路复用——这些在 WS 应用里都要自造。
 - 逐条依据（协议章节与代码位置）见 [docs/websocket-comparison.md](docs/websocket-comparison.md)；更宽的协议横评见 [docs/tcp-and-landscape.md](docs/tcp-and-landscape.md)。
 
