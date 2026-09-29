@@ -181,6 +181,7 @@ srv.OnAuth(func(cj *jsonstream.ConnectJSON) error {
 ## 下一步
 
 - [API 参考](/api)：全部公开类型与方法签名；
+- [协议术语速查](/glossary)：帧类型、Flags、错误码、配置参数四张对照表；
 - [协议规范](/protocol)：语言无关的线上格式单一事实源；
 - [架构与取舍](/DESIGN)：每条设计决策的备选方案与放弃理由；
 - 可运行的完整示例：[`examples/server`](https://github.com/cuihairu/jsonstream/tree/main/examples/server) 与 [`examples/client`](https://github.com/cuihairu/jsonstream/tree/main/examples/client)（请求/响应、流式取消、双工、单向、发布/订阅、服务端主动发起全覆盖）。

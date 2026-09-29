@@ -1,6 +1,6 @@
 # API 参考
 
-Go 参考实现的全部公开 API，签名逐一对照源码（module `github.com/cuihairu/jsonstream`，Go ≥ 1.24）。本页是人类可读的导览，规范以 [pkg.go.dev](https://pkg.go.dev/github.com/cuihairu/jsonstream) 为准；线上字节的语义见[协议规范](/protocol)。
+Go 参考实现的全部公开 API，签名逐一对照源码（module `github.com/cuihairu/jsonstream`，Go ≥ 1.24）。本页是人类可读的导览，规范以 [pkg.go.dev](https://pkg.go.dev/github.com/cuihairu/jsonstream) 为准；线上字节的语义见[协议规范](/protocol)，帧类型/Flags/错误码/Config 的速查表见[协议术语速查](/glossary)。
 
 ## 入口
 

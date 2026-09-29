@@ -27,6 +27,7 @@ export default defineConfig({
       { text: "上手指南", link: "/getting-started" },
       { text: "API 参考", link: "/api" },
       { text: "协议规范", link: "/protocol" },
+      { text: "术语速查", link: "/glossary" },
       { text: "题目要求", link: "/interview-requirements" },
     ],
     sidebar: {
@@ -36,6 +37,7 @@ export default defineConfig({
           items: [
             { text: "上手指南", link: "/getting-started" },
             { text: "API 参考", link: "/api" },
+            { text: "协议术语速查", link: "/glossary" },
             { text: "基准实测", link: "/benchmarks" },
             { text: "故障排查 / FAQ", link: "/faq" },
           ],
