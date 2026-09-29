@@ -14,7 +14,7 @@
 | `docs/NOTES.md` | `/NOTES` | 同上 |
 | `docs/design-notes.md` | `/design-notes` | 小写文件名自然是小写 URL |
 
-做法：保持「URL 与源文件名逐字符一致」即可。VitePress 的死链检查只校验链接能否解析到文件，不校验大小写（大小写错误在本地构建时依然全绿），所以这是构建门禁抓不到的一类 404——新增页面时先确认文件名大小写，再写引用。本站所有页面 URL 见 [README 的导航表](https://github.com/cuihairu/jsonstream#readme)。
+做法：保持「URL 与源文件名逐字符一致」即可。VitePress 的死链检查只校验链接能否解析到文件，不校验大小写（大小写错误在本地构建时依然全绿），所以这是构建门禁抓不到的一类 404——新增页面时先确认文件名大小写，再写引用。本站所有页面 URL 见 [README 的按读者角色导航](https://github.com/cuihairu/jsonstream#readme)。
 
 ## 部署路径与 base 配置
 
