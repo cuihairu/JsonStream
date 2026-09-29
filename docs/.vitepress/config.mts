@@ -44,6 +44,7 @@ export default defineConfig({
           text: "项目背景",
           items: [
             { text: "面试题要求", link: "/interview-requirements" },
+            { text: "更新日志", link: "/changelog" },
           ],
         },
         {

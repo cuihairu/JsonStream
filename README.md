@@ -66,7 +66,7 @@ cfg.Credit = 64     // 连接级信用窗口，生效值取双方最小
 
 ## 按读者角色导航
 
-在线文档站随 main 自动发布：<https://cuihairu.github.io/jsonstream/>。按你想做的事分流：
+在线文档站随 main 自动发布：<https://cuihairu.github.io/jsonstream/>，最近改动的逐条摘要在[更新日志](https://cuihairu.github.io/jsonstream/changelog)。按你想做的事分流：
 
 ### 使用者：在 Go 应用里直接用库
 
