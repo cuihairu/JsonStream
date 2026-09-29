@@ -5,7 +5,8 @@
 <p align="center">
   <a href="https://goreportcard.com/report/github.com/cuihairu/jsonstream"><img src="https://goreportcard.com/badge/github.com/cuihairu/jsonstream" alt="Go Report Card"></a>
   <a href="https://github.com/cuihairu/jsonstream/actions/workflows/ci.yml"><img src="https://github.com/cuihairu/jsonstream/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
-  <a href="https://codecov.io/gh/cuihairu/jsonstream"><img src="https://codecov.io/gh/cuihairu/jsonstream/branch/main/graph/badge.svg" alt="codecov"></a>
+  <a href="https://github.com/cuihairu/jsonstream/actions/workflows/pages.yml"><img src="https://github.com/cuihairu/jsonstream/actions/workflows/pages.yml/badge.svg" alt="pages"></a>
+  <a href="https://codecov.io/gh/cuihairu/jsonstream/branch/main"><img src="https://codecov.io/gh/cuihairu/jsonstream/branch/main/graph/badge.svg" alt="codecov"></a>
   <a href="https://pkg.go.dev/github.com/cuihairu/jsonstream"><img src="https://pkg.go.dev/badge/github.com/cuihairu/jsonstream.svg" alt="Go Reference"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
 </p>
@@ -14,12 +15,70 @@
 
 JsonStream 是基于 TCP 的自定义二进制帧协议，承载 JSON：一条连接跑请求/响应、流式、双工、单向、发布/订阅五种交互，心跳、断线恢复、压缩加密、credit 背压都在协议内，不靠应用层自造。Go 参考实现纯标准库、零第三方依赖（Go ≥ 1.24，[v0.1.0 发布说明](https://github.com/cuihairu/jsonstream/releases/tag/v0.1.0)）；协议规范语言无关（[docs/protocol.md](docs/protocol.md)，跨语言实现的单一事实源），其他语言实现规划中。
 
-在线文档站随 main 自动发布：<https://cuihairu.github.io/jsonstream/>，最近改动的逐条摘要在[更新日志](https://cuihairu.github.io/jsonstream/changelog)。按你想做的事分流：
+在线文档站随 main 自动发布：<https://cuihairu.github.io/jsonstream/>，最近改动的逐条摘要在[更新日志](https://cuihairu.github.io/jsonstream/changelog)。
+
+## 30 秒上手
+
+零第三方依赖：
+
+```bash
+go get github.com/cuihairu/jsonstream
+```
+
+一个路由加一次调用：
+
+```go
+ln, _ := net.Listen("tcp", "127.0.0.1:9000")
+s, _ := jsonstream.NewServer(ln, jsonstream.DefaultConfig())
+s.Handle("math.add", func(r *jsonstream.Request) (any, error) {
+    var in map[string]int
+    if err := r.Decode(&in); err != nil {
+        return nil, err
+    }
+    return map[string]int{"sum": in["a"] + in["b"]}, nil
+})
+go s.Serve()
+
+c, _ := jsonstream.Dial(context.Background(), "127.0.0.1:9000", jsonstream.DefaultConfig())
+m, _ := c.Request(context.Background(), "math.add", map[string]int{"a": 2, "b": 40})
+var out map[string]int
+_ = m.Decode(&out) // {"sum": 42}
+```
+
+## 核心特性
+
+- 一条 TCP 连接跑全部五种交互：请求/响应、流式、双工、单向、发布/订阅；数据帧都带 Stream ID（控制帧除外），多路复用无需协商
+- 心跳在协议内：双向独立 PING/PONG，读空闲超 1.5× 间隔判死——TCP keepalive 探不出进程死锁，所以不用它
+- 断线自动重连（指数退避 + 抖动）；服务端在保留期内重放订阅与下行帧（at-least-once），同会话新连接 takeover 顶替旧连接
+- 压缩（flate）、加密（AES-256-GCM + 32B 预共享密钥）、背压（credit）全部可选：握手协商生效、每帧 Flags 自描述、关闭零运行时代价
+- Metadata 与 Payload 分离：路由/主题恒为明文，网关不解码业务数据即可鉴权、限流、转发
+- 14B 定长头 + 32 位大端长度前缀，单帧载荷上限 16 MiB，解码端先校验长度后分配内存
+- 质量基线：库包语句覆盖 100%（CI 门禁）、五个 fuzz 靶持续冒烟、六件静态检查零告警、五平台交叉编译
+
+## 快速示例
+
+流式、双工、订阅、单向的逐方法写法见 [docs/api.md](docs/api.md)，五种交互模式的完整走查见 [docs/getting-started.md](docs/getting-started.md)。压缩/加密/背压都是参数化开关，握手协商后生效（双方都开才启用），默认全关、零开销：
+
+```go
+cfg := jsonstream.DefaultConfig()
+cfg.Compress = true // ≥64B 载荷走 flate
+cfg.Encrypt = true  // AES-256-GCM，先压后加
+cfg.Key = key32     // 32 字节预共享密钥
+cfg.Credit = 64     // 连接级信用窗口，生效值取双方最小
+```
+
+发起类 API 一律以 `ctx` 打头：`SendOneWay`/`Publish`（Client 与 Server 两侧）与 `Request`/`Stream`/`Channel` 同规，ctx 约束「等可用连接」与「等发送入队」两段等待（DESIGN §8.4）。该签名在首发（v0.1.0）前定版，不为旧签名留别名——旧行为等价于传 `context.Background()`。
+
+可运行的端到端程序在 [examples/](examples/)：`examples/server` 与 `examples/client` 覆盖请求/响应、流式取消、双工、单向、发布/订阅、服务端主动发起六类场景。
+
+## 文档站导航
+
+文档站全部页面按你想做的事分流：
 
 ### 使用者：在 Go 应用里直接用库
 
 - 上手：[环境与安装](https://cuihairu.github.io/jsonstream/getting-started#环境与安装)、[第一个请求/响应](https://cuihairu.github.io/jsonstream/getting-started#第一个请求-响应)、[五种交互模式](https://cuihairu.github.io/jsonstream/getting-started#五种交互模式)、[参数化开关](https://cuihairu.github.io/jsonstream/getting-started#参数化开关)
-- 参考：[Client 与 Server 的方法](https://cuihairu.github.io/jsonstream/api#client)、[Config 全字段](https://cuihairu.github.io/jsonstream/api#config)、[错误码](https://cuihairu.github.io/jsonstream/api#错误)
+- 参考：[Client 与 Server 的方法](https://cuihairu.github.io/jsonstream/api#client)、[Config 全字段](https://cuihairu.github.io/jsonstream/api#config)、[错误码](https://cuihairu.github.io/jsonstream/api#错误)、[术语速查](https://cuihairu.github.io/jsonstream/glossary)
 - 排障与性能：[FAQ](https://cuihairu.github.io/jsonstream/faq)、[基准实测](https://cuihairu.github.io/jsonstream/benchmarks)（[开销逐项解读](https://cuihairu.github.io/jsonstream/benchmarks#逐项解读-开销主要在哪)）
 
 ### SDK 作者：网关、代理与上层封装
@@ -35,58 +94,25 @@ JsonStream 是基于 TCP 的自定义二进制帧协议，承载 JSON：一条�
 - Go 参考实现的取舍与边界：[架构与取舍](https://cuihairu.github.io/jsonstream/DESIGN)（[边界情况清单](https://cuihairu.github.io/jsonstream/DESIGN#_8-边界情况清单)、[设计决策清单](https://cuihairu.github.io/jsonstream/DESIGN#_10-设计决策清单-备选方案与放弃理由)）、[设计笔记](https://cuihairu.github.io/jsonstream/design-notes)、[知识点梳理](https://cuihairu.github.io/jsonstream/NOTES)
 - 横向对照与题面：[与 WebSocket 对照](https://cuihairu.github.io/jsonstream/websocket-comparison)、[TCP 流特性与协议横评](https://cuihairu.github.io/jsonstream/tcp-and-landscape)、[题目要求](https://cuihairu.github.io/jsonstream/interview-requirements)
 
-## 特性
+## 性能基准摘要
 
-- 一条 TCP 连接跑全部五种交互：请求/响应、流式、双工、单向、发布/订阅；数据帧都带 Stream ID（控制帧除外），多路复用无需协商
-- 心跳在协议内：双向独立 PING/PONG，读空闲超 1.5× 间隔判死——TCP keepalive 探不出进程死锁，所以不用它
-- 断线自动重连（指数退避 + 抖动）；服务端在保留期内重放订阅与下行帧（at-least-once），同会话新连接 takeover 顶替旧连接
-- 压缩（flate）、加密（AES-256-GCM + 32B 预共享密钥）、背压（credit）全部可选：握手协商生效、每帧 Flags 自描述、关闭零运行时代价
-- Metadata 与 Payload 分离：路由/主题恒为明文，网关不解码业务数据即可鉴权、限流、转发
-- 14B 定长头 + 32 位大端长度前缀，单帧载荷上限 16 MiB，解码端先校验长度后分配内存
-- 质量基线：库包语句覆盖 100%（CI 门禁）、五个 fuzz 靶持续冒烟、六件静态检查零告警、五平台交叉编译
+下列数字是 [bench_test.go](bench_test.go) 九个基准的实跑口径（`go test -bench . -benchtime 2s`，i9-10880H / Go 1.24，空载窗口，量级参考）：
 
-## 快速开始
+| 基准（bench_test.go） | 结果 |
+|---|---|
+| `BenchmarkFrameRoundTrip64B` / `1KiB` / `64KiB` | ~1.1µs / ~1.1µs / ~67µs |
+| `BenchmarkTransformPlain` / `Encrypt` / `Compress`（1.4KiB JSON） | ~15ns / ~5µs / ~60µs |
+| `BenchmarkRequestResponsePlain`（本机回环 RTT） | ~0.1ms |
 
-零第三方依赖：
+跨机器只比相对关系不比绝对值：[docs/benchmarks.md](docs/benchmarks.md) 有 9 靶 × 10 轮的 benchstat 聚合版（高负载窗口实测，与本表空载值相差 2~4× 属预期，两处口径各自注记）；共享容器里 ns/op 浮动明显，可复现的是 allocs/op 与 B/op 这类结构性质。压缩路径按帧复用 flate 编解码器（`sync.Pool` + `Reset`），池化后压缩往返 4.1 倍提速、分配降 162 倍（DESIGN §10-D11）。
 
-```bash
-go get github.com/cuihairu/jsonstream
-```
+质量与验证口径：库包语句覆盖 100.0%（812/812，CI 门禁跌破即失败，两个示例包同为 100.0%）；212 个测试/基准函数；`-race -count=2` 全绿加 goroutine 泄漏守卫；五条 fuzz 靶 CI 冒烟（长跑累计千万级 execs，实锤修复「测试里抓到的真 bug」一节的第 1、2 条）；六件静态检查与五平台交叉编译全部落成 CI 门禁。方法学与逐项数据见 [docs/DESIGN.md](docs/DESIGN.md) §11，本地复现命令见下文「贡献指引」。
 
-一个路由加一次调用（`ln` 为已 `net.Listen` 好的监听器；服务端完整示例与五种交互模式见 [docs/getting-started.md](docs/getting-started.md)，可运行的端到端程序在 [examples/](examples/)）：
+## 贡献指引
 
-```go
-// 服务端：注册路由，启动
-s, _ := jsonstream.NewServer(ln, jsonstream.DefaultConfig())
-s.Handle("math.add", func(r *jsonstream.Request) (any, error) {
-    var in map[string]int
-    if err := r.Decode(&in); err != nil {
-        return nil, err
-    }
-    return map[string]int{"sum": in["a"] + in["b"]}, nil
-})
-go s.Serve()
+issue 与 PR 都欢迎；合入前请让本地验证与 CI 同绿（本仓库无 CONTRIBUTING.md，本节即贡献约定）。
 
-// 客户端：拨号，请求/响应
-c, _ := jsonstream.Dial(ctx, addr, jsonstream.DefaultConfig())
-m, _ := c.Request(ctx, "math.add", map[string]int{"a": 2, "b": 40})
-var out map[string]int
-_ = m.Decode(&out) // {"sum": 42}
-```
-
-流式、双工、订阅、单向的逐方法写法见 [docs/api.md](docs/api.md)。压缩/加密/背压都是参数化开关，握手协商后生效（双方都开才启用），默认全关、零开销：
-
-```go
-cfg := jsonstream.DefaultConfig()
-cfg.Compress = true // ≥64B 载荷走 flate
-cfg.Encrypt = true  // AES-256-GCM，先压后加
-cfg.Key = key32     // 32 字节预共享密钥
-cfg.Credit = 64     // 连接级信用窗口，生效值取双方最小
-```
-
-发起类 API 一律以 `ctx` 打头：`SendOneWay`/`Publish`（Client 与 Server 两侧）与 `Request`/`Stream`/`Channel` 同规，ctx 约束「等可用连接」与「等发送入队」两段等待（DESIGN §8.4）。该签名在首发（v0.1.0）前定版，不为旧签名留别名——旧行为等价于传 `context.Background()`。
-
-### 从源码验证
+### 本地验证
 
 ```bash
 git clone https://github.com/cuihairu/jsonstream.git
@@ -118,6 +144,19 @@ go run ./examples/server
 # 终端 2 运行客户端（请求/响应、流式取消、双工、单向、发布/订阅、服务端主动发起）
 go run ./examples/client
 ```
+
+### 文档站开发
+
+```bash
+pnpm install      # 首次；Node 22 / pnpm 12
+pnpm dev          # 本地开发，http://localhost:5173
+pnpm build        # 构建到 docs/.vitepress/dist，自带死链检查
+pnpm check:links  # 内链大小写与跨页锚点、外链真实 HEAD 探测
+```
+
+### CI 与发布
+
+推送触发两个 workflow：[ci](https://github.com/cuihairu/jsonstream/actions/workflows/ci.yml)（构建 + 全量测试 + fuzz 冒烟 + 覆盖率门禁）与 [pages](https://github.com/cuihairu/jsonstream/actions/workflows/pages.yml)（文档站构建与发布）。改文档的 PR 绿了不代表线上已更新——pages 的 deploy 只在合入 main 后执行，连续推送还会在部署队列里串行排队；三个易踩坑的细节见 [docs/faq.md](docs/faq.md)。门禁口径（覆盖率 100%、fuzz、静态检查）的逐项含义见上文「性能基准摘要」末段与 [docs/DESIGN.md](docs/DESIGN.md) §11。
 
 ## 协议与帧格式
 
@@ -198,20 +237,6 @@ TCP 是字节流没有消息边界，分帧手段无非三种：定长、分隔�
 ```go
 type Logger interface{ Printf(format string, v ...any) }
 ```
-
-## 性能
-
-下列数字是 [bench_test.go](bench_test.go) 九个基准的实跑口径（`go test -bench . -benchtime 2s`，i9-10880H / Go 1.24，空载窗口，量级参考）：
-
-| 基准（bench_test.go） | 结果 |
-|---|---|
-| `BenchmarkFrameRoundTrip64B` / `1KiB` / `64KiB` | ~1.1µs / ~1.1µs / ~67µs |
-| `BenchmarkTransformPlain` / `Encrypt` / `Compress`（1.4KiB JSON） | ~15ns / ~5µs / ~60µs |
-| `BenchmarkRequestResponsePlain`（本机回环 RTT） | ~0.1ms |
-
-跨机器只比相对关系不比绝对值：[docs/benchmarks.md](docs/benchmarks.md) 有 9 靶 × 10 轮的 benchstat 聚合版（高负载窗口实测，与本表空载值相差 2~4× 属预期，两处口径各自注记）；共享容器里 ns/op 浮动明显，可复现的是 allocs/op 与 B/op 这类结构性质。压缩路径按帧复用 flate 编解码器（`sync.Pool` + `Reset`），池化后压缩往返 4.1 倍提速、分配降 162 倍（DESIGN §10-D11）。
-
-质量与验证口径：库包语句覆盖 100.0%（812/812，CI 门禁跌破即失败，两个示例包同为 100.0%）；212 个测试/基准函数；`-race -count=2` 全绿加 goroutine 泄漏守卫；五条 fuzz 靶 CI 冒烟（长跑累计千万级 execs，实锤修复上文真 bug 1、2）；六件静态检查与五平台交叉编译全部落成 CI 门禁。方法学与逐项数据见 [docs/DESIGN.md](docs/DESIGN.md) §11，本地复现命令见上文「从源码验证」。
 
 ## 生态位对比
 
