@@ -14,7 +14,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # 双腿全量 race + 六件工具 + fuzz 冒烟的最坏组合也远小于默认 360 分钟；
+    # 双腿全量 race + 八件静态检查 + fuzz 冒烟的最坏组合也远小于默认 360 分钟；
     # 显式上限防卡死的 runner 烧配额。
     timeout-minutes: 30
     strategy:
@@ -47,8 +47,10 @@ jobs:
 
       # ---- 以下全部只在 stable 腿跑：工具兼容性绑 stable，门禁成本只付一份 ----
 
-      # gofmt 是六件静态检查里唯一"随工具链走"的（无独立工具版本），新版
-      # gofmt 可能有新格式规则，所以跟其他工具一起放 stable 腿。
+      # 八件静态检查 = vet + gofmt + 六件钉版工具（gosec/revive/staticcheck/
+      # gocritic/nilness/govulncheck）。vet 与 gofmt 无独立钉版、规则随工具链
+      # 走（vet 两腿都跑）；gofmt 新版可能带来新格式规则，所以跟六件钉版工具
+      # 一起放 stable 腿。
       - name: Check formatting
         if: matrix.go == 'stable'
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
