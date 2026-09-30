@@ -100,8 +100,8 @@ cfg.Credit = 64     // 连接级信用窗口，生效值取双方最小
 
 | 基准（bench_test.go） | 结果 |
 |---|---|
-| `BenchmarkFrameRoundTrip64B` / `1KiB` / `64KiB` | ~1.1µs / ~1.1µs / ~67µs |
-| `BenchmarkTransformPlain` / `Encrypt` / `Compress`（1.4KiB JSON） | ~15ns / ~5µs / ~60µs |
+| `BenchmarkFrameRoundTrip64B` / `1KiB` / `64KiB` | ~1.1µs / ~2.5µs / ~67µs |
+| `BenchmarkTransformPlain` / `Encrypt` / `Compress`（~1.3KiB JSON） | ~15ns / ~5µs / ~60µs |
 | `BenchmarkRequestResponsePlain`（本机回环 RTT） | ~0.1ms |
 
 跨机器只比相对关系不比绝对值：[docs/benchmarks.md](docs/benchmarks.md) 有 9 靶 × 10 轮的 benchstat 聚合版（高负载窗口实测，与本表空载值相差 2~4× 属预期，两处口径各自注记）；共享容器里 ns/op 浮动明显，可复现的是 allocs/op 与 B/op 这类结构性质。压缩路径按帧复用 flate 编解码器（`sync.Pool` + `Reset`），池化后压缩往返 4.1 倍提速、分配降 162 倍（DESIGN §10-D11）。

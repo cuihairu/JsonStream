@@ -35,7 +35,7 @@
 
 ## 依赖版本与 pnpm 设置
 
-文档站依赖极简：唯一 devDependency 是 `vitepress ^1.6.4`，Node 22、pnpm 12（CI 用 `pnpm/action-setup@v4` 钉 version 12，本地实测 12.6.0）。两处最容易卡住新环境：
+文档站依赖极简：唯一 devDependency 是 `vitepress ^1.6.4`，Node 22、pnpm 12（CI 用 `pnpm/action-setup@v4` 钉 version 12；本地版本以 `pnpm --version` 为准）。两处最容易卡住新环境：
 
 `pnpm install` 失败：构建脚本默认全拒。pnpm 12 起，依赖的 postinstall 脚本默认一律不跑且安装以失败退出。esbuild 的 postinstall 负责落位平台二进制，vite 构建必需——`pnpm-workspace.yaml` 里已显式放行：
 
