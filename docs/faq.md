@@ -103,7 +103,7 @@ go tool cover -func=coverage.out | tail -1   # 库包语句覆盖须 100%
 | `patch.target` | `100%` | 新增/改动行必须全覆盖，与 CI 的语句 100% 门禁同口径，防新代码带豁免落地 |
 | `ignore` | `examples`、`docs`、`assets` | 不参与覆盖率状态计算：examples 有独立的实测 100%（但不为覆盖率改形）、docs/assets 无 Go 覆盖率 |
 
-为什么 CI 绿了 badge 却没更新：ci.yml 里 codecov 上传步骤是 `fail_ci_if_error: false`——上传失败（网络、配额、token 失效）只影响徽章数据，不红 CI，与覆盖率门禁刻意解耦。排查顺序：Actions 里看上传步骤日志（成功会有 "queued for processing" 与报告 URL）→ Codecov 页面看该 commit 的报告是否已处理。badge 显示为 0% 或横线通常是报告尚未处理完，等几分钟再刷。
+为什么 CI 绿了 badge 却没更新：ci.yml 里 codecov 上传步骤是 `fail_ci_if_error: false`——上传失败（网络、配额、token 失效）只影响徽章数据，不红 CI，与覆盖率门禁刻意解耦。另外上传步骤带 `if: matrix.go == 'stable'`：每次 push main 都会上传，但只在 stable 腿跑一次（1.24 腿只跑兼容性测试，不重复出报告）。排查顺序：Actions 里看上传步骤日志（成功会有 "queued for processing" 与报告 URL）→ Codecov 页面看该 commit 的报告是否已处理。badge 显示为 0% 或横线通常是报告尚未处理完，等几分钟再刷。
 
 ## 其他
 

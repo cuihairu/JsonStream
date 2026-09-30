@@ -24,7 +24,8 @@ coverage:
         target: 100%
 
 # 不参与覆盖率状态计算的范围：
-# - examples：示例包有独立的 100% 语句覆盖门禁（见 README「测试结果」）
+# - examples：示例包另有独立的 100% 语句覆盖实测（见 README「性能基准摘要」
+#   的质量与验证口径段），不参与 Codecov 的状态计算
 # - docs：文档站源码与构建产物（dist），无 Go 覆盖率
 # - assets：仓库静态资产（logo 等）
 ignore:
