@@ -62,7 +62,7 @@
 | 支持单向发送，无需返回 | 完整支持：ONEWAY 永不产生任何响应帧（含错误） | [protocol.md](protocol.md) §7.7 |
 | 支持返回错误 | 完整支持：ERROR 帧 + 十个错误码 + 「哪层错误决定是否断连」惯例 | [protocol.md](protocol.md) §7.10、errors.go |
 | 支持可选背压 | 完整支持：credit 连接级窗口，默认关闭，交付应用后归还 | [protocol.md](protocol.md) §7.9、credit.go |
-| 对应的测试用例 | 已交付：212 个测试/基准/fuzz 函数，库包与示例包覆盖率 100% 且有 CI 门禁 | README「测试与质量结果」 |
+| 对应的测试用例 | 已交付：212 个测试/基准/fuzz 函数，库包与示例包覆盖率 100% 且有 CI 门禁 | README「性能基准摘要」的质量与验证口径段 |
 | 性能测试 | 已交付：bench 套件（帧编解码/变换管线/回环 RTT） | README 性能表 |
 | 完整的使用例子 | 已交付：examples/client + examples/server 端到端跑全部模式 | examples/ |
 | 相关说明文档 | 已交付：协议规范、设计、知识点、对照等 docs/ 全套 + 在线站点 | docs/、<https://cuihairu.github.io/jsonstream/> |
