@@ -44,7 +44,7 @@ number = [ "-" ] int [ frac ] [ exp ]   int = "0" / (1-9 *DIGIT)
 
 ### 1.3 本实现的落点
 
-本项目只用 `json.Marshal` / `json.Unmarshal` / `json.RawMessage`（全仓库仅这三处 JSON API，见 `json.Marshal` 10 处、`json.Unmarshal` 6 处、`json.RawMessage` 2 处），且不用 `json.Decoder`。这不是遗漏，是 §2 的结论：帧边界已经是天然的流单元，帧内再套 token 状态机换不到东西。
+本项目只用 `json.Marshal` / `json.Unmarshal` / `json.RawMessage`（全仓库仅这三处 JSON API；库代码内 `json.Marshal` 10 处、`json.Unmarshal` 6 处、`json.RawMessage` 2 处——tests 与 examples 里另有零星散用），且不用 `json.Decoder`。这不是遗漏，是 §2 的结论：帧边界已经是天然的流单元，帧内再套 token 状态机换不到东西。
 
 具体落点：
 
@@ -134,13 +134,13 @@ tr := newTransport(nc, br, …)   // ← 传的是 br 本身
 
 本实现：14B 定长头 + 32 位大端长度前缀（frame.go:23）。`ReadFrame`（frame.go:168）是教科书式两段读：`io.ReadFull(head[:14])` 再 `io.ReadFull(payload)`——ReadFull 的语义就是"读满或出错"，半包由它内部循环解决，粘包由 bufio 缓冲解决。上层 `transport.readLoop`（transport.go:175）再包一层 16KiB bufio，从内核批量搬字节减少 syscall。
 
-面试要点：能说清"粘包不是 TCP 的 bug，是字节流语义的本意"；能推导为什么 JSON 不适合分隔符成帧；知道 `io.ReadFull` vs `io.ReadFull` 循环 vs `bufio` 的分工（ReadFull 解决半包，bufio 解决 syscall 次数，二者不可互相替代）。
+面试要点：能说清"粘包不是 TCP 的 bug，是字节流语义的本意"；能推导为什么 JSON 不适合分隔符成帧；知道 `io.Read` 循环 vs `io.ReadFull` vs `bufio` 的分工（ReadFull 解决半包，bufio 解决 syscall 次数，二者不可互相替代）。
 
 ## 4. 字节序与二进制编码
 
 原理：网络字节序规定为大端（高位字节在低地址），历史原因是位拆解直观。Go 的 `encoding/binary` 提供 `BigEndian.Uint32`/`AppendUint32`；`AppendUint32` 是零分配写法（append 风格），比 `binary.Write(w, ...)` 走 io.Writer 接口快一个量级（接口调度 + 装箱）。
 
-本实现：frame.go:144-153 全部用 `binary.BigEndian.AppendXxx`；`Frame.appendTo(dst)` 是 append 风格 API——调用方传入可复用缓冲，编码器只追加。写循环里 `buf, err = t.encodeFrame(buf[:0], f)`（transport.go:138）就是"复用上一帧的缓冲"——`buf[:0]` 重置长度保留容量。
+本实现：编码路径（frame.go:144-153）多字节字段用 `binary.BigEndian.AppendXxx`，Version/Flags/Type 等单字节字段直接 append；`Frame.appendTo(dst)` 是 append 风格 API——调用方传入可复用缓冲，编码器只追加。写循环里 `buf, err = t.encodeFrame(buf[:0], f)`（transport.go:138）就是"复用上一帧的缓冲"——`buf[:0]` 重置长度保留容量。
 
 面试要点：为什么大端（历史 + 可读性 + 网络惯例）；`binary.Write` 与 `AppendUint32` 的性能差距来源（接口调用、反射路径）；append 风格 API 在热路径的价值。
 
@@ -264,7 +264,7 @@ tr := newTransport(nc, br, …)   // ← 传的是 br 本身
 
 原理：分布式系统的基础是投递语义三选一：at-most-once（可能丢）、at-least-once（可能重）、exactly-once（要序号+去重+确认，代价最高）。"断线重连恢复"的完整设计要回答：断开期间的状态谁记着（服务端会话）、记多久（保留期）、怎么续（重放）、续不上怎么办（降级路径）、新旧连接打架怎么办（takeover）。
 
-本实现：at-least-once——服务端按会话保留订阅关系 + 断开期间下行帧（4MiB/30s 上限），重连 CONNACK{resumed=true} 后重放；客户端指数退避+抖动重连，未终结流迁移到新连接（含 handler——见 bug 9-7：responder 流不迁移会白产帧撑爆保留队列）；恢复失败则挂起流以 SESSION_EXPIRED 失败、订阅自动重订、OnResumeFailed 交还应用。诚实的边界（design-notes §7）：断连瞬间 TCP 在途帧不保证送达，无 per-frame 序号无法判重，非幂等操作要业务 ID 幂等兜底；上行不缓存。
+本实现：at-least-once——服务端按会话保留订阅关系 + 断开期间下行帧（4MiB/30s 上限），重连 CONNACK{resumed=true} 后重放；客户端指数退避+抖动重连，未终结流迁移到新连接（含 handler——见 README「测试里抓到的真 bug」第 7 条：responder 流不迁移会白产帧撑爆保留队列）；恢复失败则挂起流以 SESSION_EXPIRED 失败、订阅自动重订、OnResumeFailed 交还应用。诚实的边界（design-notes §7）：断连瞬间 TCP 在途帧不保证送达，无 per-frame 序号无法判重，非幂等操作要业务 ID 幂等兜底；上行不缓存。
 
 面试要点：为什么 at-least-once 而不是 exactly-once（题面不要求 + 序号/ACK 是一整层复杂度）；takeover 的必要性（半开连接复活与新连接打架）；"恢复"与"重试"的区别（恢复是协议状态迁移，重试是应用语义）。
 
@@ -272,7 +272,7 @@ tr := newTransport(nc, br, …)   // ← 传的是 br 本身
 
 原理：先压缩后加密。AES-GCM 输出在计算上不可区分于随机字节，随机字节的熵已达上限，压缩率≈0；先加密后压缩=白付 28B 密码学开销（12B nonce + 16B tag）还保留明文冗余。GCM 本身是 AEAD：加密+认证一体，tag 校验失败即拒收——所以"解密"同时防篡改。nonce 唯一性是 GCM 的安全底线：同一 key 下 nonce 重用会泄露明文异或关系。本实现每帧随机 12B nonce 前置传输（transform.go outbound `Seal(nonce, nonce, ...)`——密文连同 nonce 一起输出，接收方取前 12B 作 nonce）。
 
-面试要点：AES-NI 使 GCM 吞吐达 GB/s 级（本机实测 ~5µs/1.4KiB，含池化开销）；PSK 的局限（不解决分发与轮换，前向保密无）；为什么握手帧恒明文（先有协商后有密钥，鸡生蛋）；"帧内自描述的 Flags"让单连接内明文帧与加密帧混合存在是特性不是漏洞。
+面试要点：AES-NI 使 GCM 吞吐达 GB/s 级（本机实测 ~5µs/~1.3KiB，含池化开销）；PSK 的局限（不解决分发与轮换，前向保密无）；为什么握手帧恒明文（先有协商后有密钥，鸡生蛋）；"帧内自描述的 Flags"让单连接内明文帧与加密帧混合存在是特性不是漏洞。
 
 ## 15. Go 语言陷阱清单（每条都对应本仓库的一处代码）
 
@@ -306,7 +306,7 @@ tr := newTransport(nc, br, …)   // ← 传的是 br 本身
 | **`defer` 在循环里累积** | 长循环里 defer 到函数结束才执行 | handler 是一流一 goroutine，`defer` 随 goroutine 结束而执行（正确用法）；`Server.Publish` 的遍历循环内没有 defer |
 | **`time.After` 在循环里** | 老版本每个都起一个 runtime timer，循环里用会堆积 | 库里的 `writeLoop` 用 `NewTicker`+`Stop`（transport.go:130）；`resubscribeLocked` 的 `time.After` 是一次性 select，可接受。Go 1.23+ 起未被引用的 timer 可被 GC 回收（go.mod 声明 1.24，所以示例里的 `time.After` 循环也是安全的） |
 | **每流一 goroutine 的代价** | 初始栈 ~8KB，活跃流多了就是内存 | 换来的取消语义干净（`streamContext` 直接包 `doneCh`）。这是"goroutine 数量换语义"的有意识取舍（DESIGN.md §6.1） |
-| **goroutine 泄漏的三种形态** | 阻塞在无人关闭的 channel / 阻塞在不返回的读 / 循环体永不退出 | 收尾单点化在 `transport.kill`（关 dead + 关 credit 闸门 + 关 conn）；`Server.handleConn` 用 `defer nc.Close()` 兜住握手失败路径 |
+| **goroutine 泄漏的三种形态** | 阻塞在无人关闭的 channel / 阻塞在不返回的读 / 循环体永不退出 | 收尾单点化在 `transport.kill`（关 dead + 关 credit 闸门 + 关 conn）；`Server.handleConn` 用 `defer func() { _ = nc.Close() }()` 兜住握手失败路径 |
 
 ### 15.3 错误处理
 
