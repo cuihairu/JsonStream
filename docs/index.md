@@ -84,7 +84,7 @@ m, _ := c.Request(ctx, "math.add", map[string]int{"a": 2, "b": 40}) // 请求/�
 s, _ := c.Stream(ctx, "range", map[string]int{"n": 100})           // 流式
 defer s.Cancel()
 sub, _ := c.Subscribe(ctx, "ticks", func(m *jsonstream.Message) error { return nil })
-_ = c.Publish(ctx, "metrics", v) // client → server
+_ = c.Publish(ctx, "metrics", map[string]float64{"cpu": 0.42}) // client → server
 ```
 
 压缩/加密/背压都是参数化开关，握手协商后生效（双方都开才启用）：

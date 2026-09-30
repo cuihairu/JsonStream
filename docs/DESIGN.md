@@ -9,7 +9,7 @@
 面试题要求（[interview-requirements.md](interview-requirements.md)）可归纳为：基于 TCP 的自定义 JSON 帧协议，支持断线重连恢复、心跳、可选压缩/加密，五种交互模式（请求/响应、流式、双工、单向、发布/订阅），可选背压，配套测试与性能数据。翻译成工程目标：
 
 1. 一条 TCP 连接多路复用所有交互模式——共享握手、心跳与恢复；
-2. 协议栈对应用暴露的 API 心智要小——Request/Stream/Channel/SendOneWay/Subscribe 五个动词，模式差异藏在协议栈内；
+2. 协议栈对应用暴露的 API 心智要小——Request/Stream/Channel/SendOneWay/Subscribe/Publish 六个动词（五个模式，pub/sub 占两个），模式差异藏在协议栈内；
 3. 每个"可选能力"真的是可选——关闭压缩/加密/背压/恢复时，不该为它们付任何运行时代价；
 4. 对恶意与错误输入有界——任何对端行为都不能把本端内存打爆或让 goroutine 泄漏。
 
@@ -43,7 +43,7 @@
   └────────────────────────────────────────────────────┘
 ```
 
-分层原则只有一条：每层只认识相邻下层。`frame.go` 不知道连接的存在（纯 `io.Reader` 进、`*Frame` 出，因此可以单测、可以 fuzz）；`transform.go` 不知道帧头（纯字节进出）；`transport.go` 不知道交互模式（帧进帧出 + 一个分发回调）；`endpoint.go` 不知道 TCP（拿着 transport 的 send/close 接口）；`Client/Server` 是两种装配门面。这个原则的直接收益：14 个源文件里没有任何一处 `net.Conn` 出现在 endpoint 层以上（除 `Server.Serve` 的 accept 与握手）。
+分层原则只有一条：每层只认识相邻下层。`frame.go` 不知道连接的存在（纯 `io.Reader` 进、`*Frame` 出，因此可以单测、可以 fuzz）；`transform.go` 不知道帧头（纯字节进出）；`transport.go` 不知道交互模式（帧进帧出 + 一个分发回调）；`endpoint.go` 不知道 TCP（拿着 transport 的 send/close 接口）；`Client/Server` 是两种装配门面。这个原则的直接收益：`net.Conn` 只出现在 transport 层与两个门面的连接边界上（`Server` 的 accept/握手/写直写、`Client` 的拨号/握手/会话绑定），endpoint 层及以下零处引用。
 
 ### 2.1 模块划分与职责
 
@@ -237,7 +237,7 @@ type endpoint struct {
 }
 ```
 
-Client 与 Server 共用 endpoint 是本实现最大的一条复用决策：分发、被动流准备、五个发起原语、流表、credit 全部只写一遍；两侧差异压缩成"clientSide 决定 ID 奇偶 + 三个可空钩子"。备选方案：客户端/服务端各一套调度器——放弃，因为 pub/sub 双向语义（PUBLISH 同一帧类型两个方向）与双工通道要求两侧逻辑对称，两套实现必然漂移，测试矩阵也要翻倍。代价是 endpoint 的 API 面比"纯客户端"宽（客户端也会带着 onSubscribe==nil 的空分支），换来的是行为对称性有单一事实来源。
+Client 与 Server 共用 endpoint 是本实现最大的一条复用决策：分发、被动流准备、六个发起原语、流表、credit 全部只写一遍；两侧差异压缩成"clientSide 决定 ID 奇偶 + 三个可空钩子"。备选方案：客户端/服务端各一套调度器——放弃，因为 pub/sub 双向语义（PUBLISH 同一帧类型两个方向）与双工通道要求两侧逻辑对称，两套实现必然漂移，测试矩阵也要翻倍。代价是 endpoint 的 API 面比"纯客户端"宽（客户端也会带着 onSubscribe==nil 的空分支），换来的是行为对称性有单一事实来源。
 
 ### 5.4 transport（transport.go:15）
 
@@ -245,6 +245,7 @@ Client 与 Server 共用 endpoint 是本实现最大的一条复用决策：分�
 type transport struct {
     conn net.Conn; reader io.Reader  // 握手期共享的 bufio
     tr *transformer; cfg *Config; credit *creditGate // nil = 无背压
+    log Logger; onDead func(error)   // 日志、断开回调（kill 里 go 触发一次）
     sendCh chan *Frame               // 256，全部出站帧的唯一入口
     handler func(*Frame) error       // 读循环分发回调
     deadOnce sync.Once; dead chan struct{}; deadErr error
@@ -282,7 +283,7 @@ type serverSession struct {
 
 - *单 goroutine per connection + 回调分发*（net/rpc 模式）：读循环直接执行 handler，实现最简单；放弃，因为任何一个慢 handler 都会停摆该连接所有流的读入（队头阻塞），心跳也随之停发——读写必须分离，执行必须与读入分离。
 - *每帧一个 goroutine*：吞吐上限高；放弃，因为流式语义（handler 串行 Emit、订阅回调串行投递）要求顺序，无界并发反而要再引入序列化层。
-- *固定 worker 池*（SimpleGoServer 题一的做法）：适合 CPU 密集 handler 的公平调度；本协议 handler 以 I/O 为主（Emit 受背压约束会阻塞），池化会把"阻塞在背压上的 handler"占满池子。每流一个 goroutine 的成本（初始栈 ~8KB）在交互数 ≤ 万级时可接受，且取消语义（streamContext）与 goroutine 生命周期天然对齐。
+- *固定 worker 池*（SimpleGoServer 题一的做法）：适合 CPU 密集 handler 的公平调度；本协议 handler 以 I/O 为主（Emit 受背压约束会阻塞），池化会把"阻塞在背压上的 handler"占满池子。每流一个 goroutine 的成本（初始栈 ~2KB，runtime `stackMin`）在交互数 ≤ 万级时可接受，且取消语义（streamContext）与 goroutine 生命周期天然对齐。
 
 ### 6.2 锁与 channel 拓扑
 
@@ -295,7 +296,7 @@ type serverSession struct {
 | routeTable.mu (RW) | 注册表 | 运行中注册对新请求立即生效 |
 | Client.mu / Server.mu / sessionStore.mu / serverSession.mu | 各自字段 | 锁序见下 |
 
-锁序（获取顺序）：`store.mu → ss.mu`（不嵌套，先快照再取）、`ss.mu → ep.streamsMu`（单向）、`flow.mu` 不与任何锁嵌套。sendCh(256)/frames(32)/notify(1)/dead/doneCh/ackCh 的容量与信号语义都写在类型注释里——cap-1 的 notify 是"信号量"而非"队列"（credit.go:12），多路 add 只需唤醒一次，`select+default` 投递永不阻塞。
+锁序（获取顺序）：`store.mu → ss.mu`（不嵌套，先快照再取）、`ss.mu → ep.streamsMu`（单向）、`flow.mu` 不与任何锁嵌套。sendCh(256)/frames(32)/notify(1)/dead/doneCh/ackCh 的容量与信号语义都写在类型注释里——cap-1 的 notify 是"信号量"而非"队列"（credit.go:14），多路 add 只需唤醒一次，`select+default` 投递永不阻塞。
 
 ### 6.3 出站串行化：为什么是 sendCh 而不是写锁
 
@@ -382,7 +383,7 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 | `Credit` 窗口为 1 | `creditFlushAt` 下限钳到 1 | endpoint.go:49 | 半窗为 0 会导致"永远攒不到回授"——额度只减不增，流必然饿死 |
 | ONEWAY 路由不存在 | 静默丢弃，不回帧也不记日志 | endpoint.go:333 | ONEWAY 是高频路径，可被随机路由刷爆日志——那等于把 DoS 面开进可观测性 |
 | 订阅不存在的主题 | SUBACK 成功 | endpoint.go:202 | 订阅问的是"以后能不能收到"，不是"现在有没有人生产" |
-| `nil` 接收者的 `ReadStream`/`Subscription` | 全部方法 no-op 返回 | flow.go:182/216/230 | 使用方的 `defer s.Cancel()` 在出错路径上可能对着 nil 调用 |
+| `nil` 接收者的 `ReadStream` | `Next`/`Err`/`Cancel` 全部 no-op 返回 | flow.go:182/216/230 | 使用方的 `defer s.Cancel()` 在出错路径上可能对着 nil 调用；`Subscription` 的方法无此防护，nil 句柄恒伴随 Subscribe 的非 nil error，须以 err 为判据 |
 | `Cancel`/`Close` 二次调用 | 幂等 | flow.go:230/299 | 释放接口必须可重入（§7 配套纪律） |
 | 加密启用但密钥不是 32B | 构造期失败，不建连接 | transform.go:51 | 配置错误要在握手前暴露，而不是让每一帧都失败 |
 | `SendOneWay`/`Publish` 曾无 ctx 参数（API 不对称） | 已补 ctx：Client/Server 各自的 `SendOneWay` 与 `Publish` 四个入口，ctx 约束「等可用连接」（waitEp）与「等发送入队」（sendCtx）两段 | client.go:181/191、server.go:72/182 | 原不对称的代价：断连时调用等的是重连而非调用方超时，服务端消失就无限等。**兼容策略**：仓库未发版（无 tag、无外部消费者），就地破坏性变更，不为旧签名留别名；旧行为等价于传 `context.Background()`，而内部机械路径（downSink 投递、信用回授、保留帧重放）也恒用 Background——语义与旧 `send` 完全一致 |
@@ -397,7 +398,7 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 | --- | --- | --- | --- |
 | `appendTo` 编码 | O(L + M) | O(L + M) | 写循环复用 `buf[:0]`，稳态零分配 |
 | `ReadFrame` 解码 | O(L + M) | O(L + M) | 头是栈数组；2 次堆分配（元数据、载荷） |
-| flate 压缩 | O(L)（常数级 CPU 系数大） | O(L) | 实测 ~25× 慢于 GCM，是管线的主要成本 |
+| flate 压缩 | O(L)（常数级 CPU 系数大） | O(L) | 实测比 GCM 贵 3.7~12×（跨窗口浮动，见 §11.2），是管线的主要成本 |
 | GCM 加/解密 | O(L) + 28B | O(L) + 28B | 12B nonce + 16B tag；AES-NI 下 GB/s 级 |
 | `deliver` 投递 | O(1) | O(1) | 通道操作，帧传指针不拷贝 |
 | 路由查找 | O(1) 期望 | O(1) | map 哈希 |
@@ -414,7 +415,7 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 | `flow` 结构体 | N | ~200B + 通道 32×8B | N 由应用并发决定 |
 | `frames` 缓冲 | N | 32 个指针（帧体共享） | 缓冲深度常量 32 |
 | `sendCh` | 1/连接 | 256 个指针 | 常量 256 |
-| 读/写循环 goroutine | 2/连接 | 初始栈 ~8KB，按需增长 | 常量 |
+| 读/写循环 goroutine | 2/连接 | 初始栈 ~2KB，按需增长 | 常量 |
 | 保留队列 | 1/会话 | ≤ `RetentionBytes`（4MiB） | 字节记账，超限降级 |
 | 单帧载荷 | — | ≤ 16MiB | 硬上限，分配前校验 |
 
@@ -433,7 +434,7 @@ send 的死连接预检（transport.go:93）是被真 bug 逼出来的：连接�
 | 会话保留（每帧） | O(1) 均摊 | O(S) | append + 字节记账，O(1) |
 | 保留队列溢出清理 | O(S) 一次性 | → 0 | 整队丢弃并标记 `overflowed` |
 | 重放 | O(保留帧数) | O(1) 额外 | 直接排入 `sendCh` |
-| 迁移流（`bind`） | O(N) | O(1) | 遍历 `snapshot()`，单向流迁移、双向流不迁 |
+| 迁移流（`bind`） | O(N) | O(1) | 遍历 `snapshot()`，奇数流（客户端发起）连 handler 迁移、偶数流（服务端发起）不迁 |
 | 会话终结（`terminate`） | O(N) | O(1) | 先快照后解锁，避免锁序倒置 |
 | 重连期望耗时 | O(BackoffMax) | O(1) | 指数退避 × 抖动，期望 ~1.5× 上限；**最坏无界**（一直重试到 `Close`） |
 
@@ -568,4 +569,4 @@ $ go test -coverprofile=c.out .   # 第二次：ok ... (cached) coverage: 100.0%
 4. 讲 §4 的三层"流"：定长头如何把解析状态机消掉、帧如何逐帧交付、载荷为何延迟解码——这一段最能区分"抄过 WebSocket"和"理解分帧"。
 5. 讲并发模型 §6：双 I/O goroutine + 每流执行 goroutine，select 随机性的两个陷阱（死连接双就绪、终结排空）。
 6. 讲错误三级分类 §7，引出 kill 单点与幂等释放；顺手翻 §8 的边界清单证明每个"防御"都有具体对手。
-7. 用 §9 的复杂度与 §11 的数据收尾（固定成本 vs 边际成本、flate 与 GCM 的 7 倍差），主动抛 design-notes §7 的缺点清单——先于面试官说出来。
+7. 用 §9 的复杂度与 §11 的数据收尾（固定成本 vs 边际成本、flate 与 GCM 的倍数差——跨窗口 3.7~12×，见 §11.2），主动抛 design-notes §7 的缺点清单——先于面试官说出来。

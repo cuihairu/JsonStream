@@ -194,7 +194,7 @@ tr := newTransport(nc, br, …)   // ← 传的是 br 本身
 2. 终结排空（flow.go:181）：doneCh 关闭时 frames 里可能还有余帧，Next 的 select 双就绪随机选择，直接返回 false 会随机丢最后一帧。修法：doneCh 分支先排空 frames。教训：异步终结与缓冲交付的组合必须在消费端显式排空。
 3. cap-1 信号量（credit.go:14）：notify 容量为 1，多次 add 只保留一次唤醒信号——因为它传的是"有新令牌"这个事件而非数量，数量在 mu 保护的 n 里。这是把"事件"与"计数"分离的标准写法，避免每令牌一个 channel 元素。
 
-调度侧：每连接两 I/O goroutine + 每流一执行 goroutine 的模型下，Go 的 netpoller（epoll/kqueue）把阻塞在 net.Conn.Read/Write 的 goroutine 挂起、就绪时唤醒——所以"每连接一个读 goroutine"在万级连接下依然便宜（每 goroutine 初始栈 ~8KB，1 万连接 ~80MB 栈上限但实际按需增长）。GOMAXPROCS 个 P 分摊就绪队列，多核利用不需要应用做任何事。
+调度侧：每连接两 I/O goroutine + 每流一执行 goroutine 的模型下，Go 的 netpoller（epoll/kqueue）把阻塞在 net.Conn.Read/Write 的 goroutine 挂起、就绪时唤醒——所以"每连接一个读 goroutine"在万级连接下依然便宜（每 goroutine 初始栈 ~2KB，1 万连接 ~20MB 栈上限但实际按需增长）。GOMAXPROCS 个 P 分摊就绪队列，多核利用不需要应用做任何事。
 
 面试要点：能讲 close 的广播语义与"closed channel 恒就绪"如何被用来做取消传播（dead/doneCh/closed 都是）；能讲 select 随机性的两面性；知道 channel 不是免费的（一次往返 ~50-100ns，热路径上缓冲大小要给理由——sendCh 256 是"突发下不阻塞应用"，frames 32 是"无背压时的兜底"）。
 
@@ -305,7 +305,7 @@ tr := newTransport(nc, br, …)   // ← 传的是 br 本身
 | **`sync.Pool` 两轮 GC 后清空** | 不是缓存，命中率取决于分配压力 | flate 读写器池化（transform.go:23/27）；取出即 `Reset`，保证不跨帧泄漏流状态 |
 | **`defer` 在循环里累积** | 长循环里 defer 到函数结束才执行 | handler 是一流一 goroutine，`defer` 随 goroutine 结束而执行（正确用法）；`Server.Publish` 的遍历循环内没有 defer |
 | **`time.After` 在循环里** | 老版本每个都起一个 runtime timer，循环里用会堆积 | 库里的 `writeLoop` 用 `NewTicker`+`Stop`（transport.go:130）；`resubscribeLocked` 的 `time.After` 是一次性 select，可接受。Go 1.23+ 起未被引用的 timer 可被 GC 回收（go.mod 声明 1.24，所以示例里的 `time.After` 循环也是安全的） |
-| **每流一 goroutine 的代价** | 初始栈 ~8KB，活跃流多了就是内存 | 换来的取消语义干净（`streamContext` 直接包 `doneCh`）。这是"goroutine 数量换语义"的有意识取舍（DESIGN.md §6.1） |
+| **每流一 goroutine 的代价** | 初始栈 ~2KB，活跃流多了就是内存 | 换来的取消语义干净（`streamContext` 直接包 `doneCh`）。这是"goroutine 数量换语义"的有意识取舍（DESIGN.md §6.1） |
 | **goroutine 泄漏的三种形态** | 阻塞在无人关闭的 channel / 阻塞在不返回的读 / 循环体永不退出 | 收尾单点化在 `transport.kill`（关 dead + 关 credit 闸门 + 关 conn）；`Server.handleConn` 用 `defer func() { _ = nc.Close() }()` 兜住握手失败路径 |
 
 ### 15.3 错误处理
