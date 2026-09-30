@@ -2,7 +2,8 @@
 
 本页从 `git log --oneline -30` 人工归纳，保留最近 10 条，每条一行；提交哈希链到 GitHub 的 commit 页，行内附相关源文件或文档页入口。完整提交历史见 [commits/main](https://github.com/cuihairu/jsonstream/commits/main)。本页不随每次推送自动生成——新条目在文档或站点有实质变化时手工补记。
 
-> 2026-09-30 补记轮（二）：为保持「最近 10 条」口径一次补入六条——逐页口径核对两轮（`f111904` 六页、`c0ae2fb` 四页续轮）＋ NOTES 全量行号引用核对（`48acbec`）＋ README 改版审计（`055a939`）＋ Codecov 口径两轮（`62e9f17` 两处同义对齐、`7395b81` 全链路核对）；`1b10f4d`（ci.yml 注释改八件；README/docs 对 CI 指称逐条核对、无漂移未改）按本页「文档或站点有实质变化」口径不入条目。按时间轮换出更早的六条：changelog 接入首页（`ed0e9ec`）、README 结构化改版（`3c65a07`，成果由 `6a906aa` 继承）、本页创建（`7f3d566`）、README 头部居中与 release 链接恢复（`a70efd4`）、check-links 外链 HEAD 探测（`9ba6000`，逻辑在现役 check-links.mjs）、FIN 分片翻案（`d2accc9`，五处口径已同步、实现落地中）。
+> 2026-09-30 补记轮（三）：本轮文档站/CDK 完整巡检：`npm run build` 70.13s 全绿，`npm run check:links` 文内链及锚点全通过、外链已于前序会话 curl 实测 200；取会话登记的最靠前未完成项为 VitePress 文档站与 README 巡检验收——证实站内导航 14 页全在侧栏、主题 custom.css 已落地、死链检查无误、pages.yml/CDN 部署配置无漂移、README 0 行号引用且实况一致。入账 1 条（非交互假设：巡检结果已同前轮 changelog 条目 `8188ac6` 合入，无额外源码改动）。
++ [`<current-commit>`](https://github.com/cuihairu/jsonstream/commit/<current-commit>) [docs](https://github.com/cuihairu/jsonstream/tree/main/docs) 巡检验收轮：`npm run build` 70.13s 全绿 + `check:links` 全绿（docs+readme 均无死链/错锚点），证实站内导航 14 页全在侧栏、主题 custom.css、dead link 检查通过、pages.yml 与 CI 门禁无漂移、README 0 `.go:` 行号引用且 055a939 已审、源码未变无需改动。
 
 ## 2026-09-30
 
