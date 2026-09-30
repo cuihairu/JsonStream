@@ -53,7 +53,7 @@ _ = m.Decode(&out) // {"sum": 42}
 - 压缩（flate）、加密（AES-256-GCM + 32B 预共享密钥）、背压（credit）全部可选：握手协商生效、每帧 Flags 自描述、关闭零运行时代价
 - Metadata 与 Payload 分离：路由/主题恒为明文，网关不解码业务数据即可鉴权、限流、转发
 - 14B 定长头 + 32 位大端长度前缀，单帧载荷上限 16 MiB，解码端先校验长度后分配内存
-- 质量基线：库包语句覆盖 100%（CI 门禁）、五个 fuzz 靶持续冒烟、六件静态检查零告警、五平台交叉编译
+- 质量基线：库包语句覆盖 100%（CI 门禁）、五个 fuzz 靶持续冒烟、八件静态检查零告警、五平台交叉编译
 
 ## 快速示例
 
@@ -104,9 +104,9 @@ cfg.Credit = 64     // 连接级信用窗口，生效值取双方最小
 | `BenchmarkTransformPlain` / `Encrypt` / `Compress`（~1.3KiB JSON） | ~15ns / ~5µs / ~60µs |
 | `BenchmarkRequestResponsePlain`（本机回环 RTT） | ~0.1ms |
 
-跨机器只比相对关系不比绝对值：[docs/benchmarks.md](docs/benchmarks.md) 有 9 靶 × 10 轮的 benchstat 聚合版（高负载窗口实测，与本表空载值相差 2~4× 属预期，两处口径各自注记）；共享容器里 ns/op 浮动明显，可复现的是 allocs/op 与 B/op 这类结构性质。压缩路径按帧复用 flate 编解码器（`sync.Pool` + `Reset`），池化后压缩往返 4.1 倍提速、分配降 162 倍（DESIGN §10-D11）。
+跨机器只比相对关系不比绝对值：[docs/benchmarks.md](docs/benchmarks.md) 有 9 靶 × 10 轮的 benchstat 聚合版（高负载窗口实测，与本表空载值相差 2~8× 属实测范围，两处口径各自注记）；共享容器里 ns/op 浮动明显，可复现的是 allocs/op 与 B/op 这类结构性质。压缩路径按帧复用 flate 编解码器（`sync.Pool` + `Reset`），池化后压缩往返 4.1 倍提速、分配降 162 倍（DESIGN §10-D11）。
 
-质量与验证口径：库包语句覆盖 100.0%（CI 门禁跌破即失败；语句计数随 Go 工具链版本不同——1.24 与 stable 两腿实测均为 100.0%，故只记百分比不记分母，两个示例包同为 100.0%）；212 个测试/基准函数；`-race -count=2` 全绿加 goroutine 泄漏守卫；五条 fuzz 靶 CI 冒烟（长跑累计千万级 execs，实锤修复「测试里抓到的真 bug」一节的第 1、2 条）；六件静态检查与五平台交叉编译全部落成 CI 门禁。方法学与逐项数据见 [docs/DESIGN.md](docs/DESIGN.md) §11，本地复现命令见下文「贡献指引」。
+质量与验证口径：库包语句覆盖 100.0%（CI 门禁跌破即失败；语句计数随 Go 工具链版本不同——1.24 与 stable 两腿实测均为 100.0%，故只记百分比不记分母，两个示例包同为 100.0%）；212 个测试/基准函数；`-race -count=1` 全绿（CI 门禁同款）加 goroutine 泄漏守卫；五条 fuzz 靶 CI 冒烟（长跑累计千万级 execs，实锤修复「测试里抓到的真 bug」一节的第 1、2 条）；八件静态检查（vet/gofmt/gosec/revive/staticcheck/gocritic/nilness/govulncheck）与五平台交叉编译全部落成 CI 门禁。方法学与逐项数据见 [docs/DESIGN.md](docs/DESIGN.md) §11，本地复现命令见下文「贡献指引」。
 
 ## 贡献指引
 
