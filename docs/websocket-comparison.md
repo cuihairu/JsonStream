@@ -27,7 +27,7 @@ WebSocket 握手有标准的 `Sec-WebSocket-Protocol`（子协议）与 `Sec-Web
 
 ### ⑤ 文本/二进制 opcode 区分
 
-WebSocket 用 opcode 区分 text（0x1）/binary（0x2），文本帧附带 UTF-8 合法性校验义务。JsonStream 的 15 个帧类型全是控制/语义类型（frame.go:42–58），payload 按题面统一为 JSON——这是题面约束下的简化而非能力缺陷，但代价是协议失去承载非 JSON 载荷的官方位置（要扩展需动 Type 表或 Flags）。
+WebSocket 用 opcode 区分 text（0x1）/binary（0x2），文本帧附带 UTF-8 合法性校验义务。JsonStream 的 15 个帧类型全是控制/语义类型（frame.go:45–61），payload 按题面统一为 JSON——这是题面约束下的简化而非能力缺陷，但代价是协议失去承载非 JSON 载荷的官方位置（要扩展需动 Type 表或 Flags）。
 
 ### ⑥ 客户端帧 Masking —— 明确不需要
 
