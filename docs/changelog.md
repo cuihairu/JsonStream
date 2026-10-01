@@ -2,10 +2,11 @@
 
 本页从 `git log --oneline -30` 人工归纳，保留最近 10 条，每条一行；提交哈希链到 GitHub 的 commit 页，行内附相关源文件或文档页入口。完整提交历史见 [commits/main](https://github.com/cuihairu/jsonstream/commits/main)。本页不随每次推送自动生成——新条目在文档或站点有实质变化时手工补记。
 
-> 2026-10-01 benchmarks 实测复核轮：重跑 9 靶 × 10 轮基准取轻载窗口读数，[benchmarks](/benchmarks) 正文三表与逐项解读按实测改写、旧 2026-09-28 高负载数据与 2026-09-30 复测注降级为「历史窗口对照」；[README](https://github.com/cuihairu/jsonstream/blob/main/README.md) 性能表与跨窗口差声明同源同步（表改用同一实跑值，2~8×→3.5~8.5×）；[DESIGN](/DESIGN) §9.1/§11.2/§12 三处倍数引用随之协调（3.7~12×→3.6~12×、「README 空载表 12×」改标历史口径、§11.2 窗口清单补 2026-10-01 轻载 3.6×）。自 `d8d52de` 起窗口内无其他候选提交，本轮自身不入本页条目、留待下一补记轮（非交互假设：单笔提交写不进自身哈希，不复用会产生死链的占位符写法）。
+> 2026-10-01 全量链接审计轮：docs 14 页 + README 共 200 条内联链接逐一校验——140 条站内/相对链接与 31 条线上站链接（含全部 fragment）对照 dist 页面与 heading id 真值，29 条 github.com/其他外链 curl 逐一探测全 200，config 侧栏/导航与首页 frontmatter 的全部 link 目标均解析到现存页，无孤儿页（仅首页不在侧栏，属正常），含空格 URL/图片/引用式/blob 行锚点等边角类逐类排查均无——零死链、零错锚、零缺资源，无可修复项。自 `d8d52de` 起窗口内入账 1 条（`2752d56`），按时间轮换出最旧 `26571dd`（其两处陈旧指称修复在各页存续），保持最近 10 条；本轮自身不入条目（非交互假设：清扫脚本为 /tmp 临时件不入库，沿 `26571dd` 前例；单笔提交写不进自身哈希，不复用占位符写法）。
 
 ## 2026-10-01
 
+- [`2752d56`](https://github.com/cuihairu/jsonstream/commit/2752d56) benchmarks 实测复核轮：跑 9 靶 × 10 轮取 2026-10-01 轻载窗口读数，[benchmarks](/benchmarks) 正文三表与逐项解读按实测改写（旧 09-28 高负载数据与 09-30 复测注降级「历史窗口对照」，补端到端载荷口径）、[README](https://github.com/cuihairu/jsonstream/blob/main/README.md) 性能表与跨窗口差声明同源同步（2~8×→3.5~8.5×）、[DESIGN](/DESIGN) §9.1/§11.2/§12 倍数引用随之协调（3.7~12×→3.6~12×），线速单位勘正 MiB/s→MB/s。
 - [`b64bd8c`](https://github.com/cuihairu/jsonstream/commit/b64bd8c) [README](https://github.com/cuihairu/jsonstream/blob/main/README.md) 对照 docs 站点现状改版：快速上手六签名（NewServer/Handle/Serve/Dial/Request/Decode）与 13 字段配置表对照源码逐段核对全精确；徽章区新增文档站直达徽章（Codecov 徽章与站点/changelog 链接核对为已存在有效项，不重复添加）；修两处口径——基准「九个基准的实跑口径」与表列七行矛盾改「摘自九靶中七靶」（压+加与加密端到端两靶无空载存档值，不跨窗口混填）、测试计数「212 个测试/基准函数」按 [interview-requirements](/interview-requirements) 口径补「/fuzz」（198 Test+9 Benchmark+5 Fuzz=212 复测精确）。
 
 ## 2026-09-30
@@ -18,5 +19,4 @@
 - [`f111904`](https://github.com/cuihairu/jsonstream/commit/f111904) 逐页口径核对轮：[benchmarks](/benchmarks)、[faq](/faq)、[getting-started](/getting-started)、[api](/api)、[glossary](/glossary)、[design-notes](/design-notes) 六页对照源码与 README 全量核实，修 5 处——README 性能表 1KiB 行誊抄错值（改 ~2.5µs）、载荷口径统一 ~1.3KiB、benchmarks 补 2026-09-30 复测注（跨窗口差 2~4×→2~8×）、[DESIGN](/DESIGN) §11.2 压缩/加密比值改跨窗口实测 3.7~12×、faq 的 pnpm 版本表述改不腐烂。
 - [`62e9f17`](https://github.com/cuihairu/jsonstream/commit/62e9f17) 覆盖率口径句在 [README](https://github.com/cuihairu/jsonstream/blob/main/README.md) 与 [design-notes](/design-notes) 两处同义对齐（「略有差异/不同」「所以/故」统一；句义不变：只记 100.0% 不记语句分母），codecov.yml 与 FAQ 双口径已一致无需改。
 - [`d9874c9`](https://github.com/cuihairu/jsonstream/commit/d9874c9) 覆盖率口径改为只记百分比不记分母：[README](https://github.com/cuihairu/jsonstream/blob/main/README.md) 与 [design-notes §9](/design-notes) 同步——语句计数随 Go 工具链版本变化（ci.yml 矩阵的 1.24 与 stable 两腿实测同为 100.0%），故两处不再写死 812/812。
-- [`26571dd`](https://github.com/cuihairu/jsonstream/commit/26571dd) 全站链接与锚点校验轮：独立清扫脚本补上 [check-links.mjs](https://github.com/cuihairu/jsonstream/blob/main/docs/.vitepress/check-links.mjs) 不覆盖的两类（docs 各页同页锚点、[README](https://github.com/cuihairu/jsonstream/blob/main/README.md) 指向线上站的外链 fragment），全绿；顺带修复 [DESIGN](/DESIGN) 与 [interview-requirements](/interview-requirements) 里两处指称已不存在的 README 节名的陈旧引用；覆盖率 100.0% 与 212 测试总数复测成立。
 
