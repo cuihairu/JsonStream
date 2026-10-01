@@ -3,7 +3,6 @@
 <h1 align="center">JsonStream</h1>
 
 <p align="center">
-  <a href="https://goreportcard.com/report/github.com/cuihairu/jsonstream"><img src="https://goreportcard.com/badge/github.com/cuihairu/jsonstream" alt="Go Report Card"></a>
   <a href="https://github.com/cuihairu/jsonstream/actions/workflows/ci.yml"><img src="https://github.com/cuihairu/jsonstream/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
   <a href="https://github.com/cuihairu/jsonstream/actions/workflows/pages.yml"><img src="https://github.com/cuihairu/jsonstream/actions/workflows/pages.yml/badge.svg" alt="pages"></a>
   <a href="https://cuihairu.github.io/jsonstream/"><img src="https://img.shields.io/badge/docs-GitHub%20Pages-blue" alt="docs"></a>

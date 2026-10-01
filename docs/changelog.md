@@ -2,7 +2,7 @@
 
 本页从 `git log --oneline -30` 人工归纳，保留最近 10 条，每条一行；提交哈希链到 GitHub 的 commit 页，行内附相关源文件或文档页入口。完整提交历史见 [commits/main](https://github.com/cuihairu/jsonstream/commits/main)。本页不随每次推送自动生成——新条目在文档或站点有实质变化时手工补记。
 
-> 2026-10-01 全量链接审计轮：docs 14 页 + README 共 200 条内联链接逐一校验——140 条站内/相对链接与 31 条线上站链接（含全部 fragment）对照 dist 页面与 heading id 真值，29 条 github.com/其他外链 curl 逐一探测全 200，config 侧栏/导航与首页 frontmatter 的全部 link 目标均解析到现存页，无孤儿页（仅首页不在侧栏，属正常），含空格 URL/图片/引用式/blob 行锚点等边角类逐类排查均无——零死链、零错锚、零缺资源，无可修复项。自 `d8d52de` 起窗口内入账 1 条（`2752d56`），按时间轮换出最旧 `26571dd`（其两处陈旧指称修复在各页存续），保持最近 10 条；本轮自身不入条目（非交互假设：清扫脚本为 /tmp 临时件不入库，沿 `26571dd` 前例；单笔提交写不进自身哈希，不复用占位符写法）。
+> 2026-10-01 Pages/README/Codecov 部署核验轮：① Pages 最新部署 run `93287d1` completed/success，线上站 14 页 curl 抽查全 200 且内容新鲜（benchmarks 页含 2026-10-01 窗口读数、changelog 页含 `2752d56` 条目）；② README 六枚徽章逐一枚举——href 六全 200，ci/pages 徽章 `passing` 与最新 run success 一致、codecov `100%` 与 codecov.yml「≈99.85% 四舍五入」一致、pkg.go.dev 官方矢量徽章与 docs/License 正常，唯 **Go Report Card 已全站 sunset**（徽章端点恒返 "retired"、report 页无评级，公告原文「after more than a decade… has been sunset」），本轮移除该徽章（唯一坏徽章，全仓无其他 GRC 提及）；③ codecov.yml 五项配置与 ci.yml 上传步骤逐项对账一致（`require_ci_to_pass`/target 99%/range 95..100/patch 100%/ignore 三项均与 FAQ 表逐字吻合，badge `100%` 与实测口径一致），`CODECOV_TOKEN` secret 实存（2026-09-27 配置，ci.yml 注释「仓库已配置」属实），token 缺失/失效时的降级行为已在 FAQ §codecov 与 ci.yml 注释如实注明（`fail_ci_if_error: false`——上传失败只停更徽章不红 CI，stable 腿单次上传），本轮未新增任何数据外发；④ 修 1 处（GRC 徽章）。自 `93287d1` 起窗口内无其他候选提交（`93287d1` 为纯记账提交，按 `6b4fadc` 前例不入条目），保持最近 10 条；本轮自身不入条目（单笔提交写不进自身哈希，不复用占位符写法）。
 
 ## 2026-10-01
 
