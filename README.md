@@ -106,7 +106,7 @@ cfg.Credit = 64     // 连接级信用窗口，生效值取双方最小
 
 跨机器只比相对关系不比绝对值：本表与 [docs/benchmarks.md](docs/benchmarks.md) 的 9 靶 × 10 轮 benchstat 聚合版同源（同一次 2026-10-01 实跑，两处口径各自注记），该页另保留 2026-09-28 高负载窗口的同套数字作对照（同靶相差 3.5~8.5× 属实测范围）；共享容器里 ns/op 浮动明显，可复现的是 allocs/op 与 B/op 这类结构性性质。压缩路径按帧复用 flate 编解码器（`sync.Pool` + `Reset`），池化后压缩往返 4.1 倍提速、分配降 162 倍（DESIGN §10-D11）。
 
-质量与验证口径：库包语句覆盖 100.0%（CI 门禁跌破即失败；语句计数随 Go 工具链版本不同——1.24 与 stable 两腿实测均为 100.0%，故只记百分比不记分母，两个示例包同为 100.0%）；212 个测试/基准/fuzz 函数；`-race -count=1` 全绿（CI 门禁同款）加 goroutine 泄漏守卫；五条 fuzz 靶 CI 冒烟（长跑累计千万级 execs，实锤修复「测试里抓到的真 bug」一节的第 1、2 条）；八件静态检查（vet/gofmt/gosec/revive/staticcheck/gocritic/nilness/govulncheck）与五平台交叉编译全部落成 CI 门禁。方法学与逐项数据见 [docs/DESIGN.md](docs/DESIGN.md) §11，本地复现命令见下文「贡献指引」。
+质量与验证口径：库包语句覆盖 100.0%（CI 门禁跌破即失败；语句计数随 Go 工具链版本不同——1.24 与 stable 两腿实测均为 100.0%，故只记百分比不记分母，两个示例包同为 100.0%）；Codecov 徽章显示 100%（`codecv.yml` 行覆盖目标 99%，当前 ≈99.85% 四舍五入），不红 CI（`fail_ci_if_error: false`，与语句 100% 门禁解耦）；212 个测试/基准/fuzz 函数；`-race -count=1` 全绿（CI 门禁同款）加 goroutine 泄漏守卫；五条 fuzz 靶 CI 冒烟（长跑累计千万级 execs，实锤修复「测试里抓到的真 bug」一节的第 1、2 条）；八件静态检查（vet/gofmt/gosec/revive/staticcheck/gocritic/nilness/govulncheck）与五平台交叉编译全部落成 CI 门禁。方法学与逐项数据见 [docs/DESIGN.md](docs/DESIGN.md) §11，本地复现命令见下文「贡献指引」。
 
 ## 贡献指引
 

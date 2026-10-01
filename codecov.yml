@@ -3,7 +3,9 @@
 # 与 CI 的分工：覆盖率真门禁在 ci.yml 里（go tool cover 语句口径 100%，
 # 跌破即红）；本文件只约束 Codecov 侧的线覆盖状态检查与上报范围，两者
 # 口径不同（语句 vs 行），不互相替代。
-codecov:
+# 徽章显示 100% 为四舍五入：project.target=99% 与 range=95..100 容差带配合，
+# 当前 ≈99.85% 经四舍五入显示为 100%。
+codecv:
   # 等 CI 全绿后再出 Codecov 状态：CI 红的时候没有裁决资格，避免
   # 「CI 挂了但 Codecov 绿」的假信号。
   require_ci_to_pass: true
