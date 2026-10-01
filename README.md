@@ -97,15 +97,15 @@ cfg.Credit = 64     // 连接级信用窗口，生效值取双方最小
 
 ## 性能基准摘要
 
-下列数字摘自 [bench_test.go](bench_test.go) 九个基准中的七靶（`go test -bench . -benchtime 2s`，i9-10880H / Go 1.24，空载窗口，量级参考；压+加与加密端到端两靶的空载值未列，全量 9 靶见下文）：
+下列数字摘自 [bench_test.go](bench_test.go) 九个基准中的七靶（`go test -run '^$' -bench . -benchmem -count=10 -benchtime=1s`，i9-10880H / Go 1.27.1，2026-10-01 轻载窗口，量级参考；压+加与加密端到端两靶未列，全量 9 靶见下文）：
 
 | 基准（bench_test.go） | 结果 |
 |---|---|
-| `BenchmarkFrameRoundTrip64B` / `1KiB` / `64KiB` | ~1.1µs / ~2.5µs / ~67µs |
-| `BenchmarkTransformPlain` / `Encrypt` / `Compress`（~1.3KiB JSON） | ~15ns / ~5µs / ~60µs |
-| `BenchmarkRequestResponsePlain`（本机回环 RTT） | ~0.1ms |
+| `BenchmarkFrameRoundTrip64B` / `1KiB` / `64KiB` | ~0.6µs / ~1.8µs / ~33µs |
+| `BenchmarkTransformPlain` / `Encrypt` / `Compress`（~1.3KiB JSON） | ~14ns / ~7.7µs / ~27µs |
+| `BenchmarkRequestResponsePlain`（本机回环 RTT） | ~0.12ms |
 
-跨机器只比相对关系不比绝对值：[docs/benchmarks.md](docs/benchmarks.md) 有 9 靶 × 10 轮的 benchstat 聚合版（高负载窗口实测，与本表空载值相差 2~8× 属实测范围，两处口径各自注记）；共享容器里 ns/op 浮动明显，可复现的是 allocs/op 与 B/op 这类结构性质。压缩路径按帧复用 flate 编解码器（`sync.Pool` + `Reset`），池化后压缩往返 4.1 倍提速、分配降 162 倍（DESIGN §10-D11）。
+跨机器只比相对关系不比绝对值：本表与 [docs/benchmarks.md](docs/benchmarks.md) 的 9 靶 × 10 轮 benchstat 聚合版同源（同一次 2026-10-01 实跑，两处口径各自注记），该页另保留 2026-09-28 高负载窗口的同套数字作对照（同靶相差 3.5~8.5× 属实测范围）；共享容器里 ns/op 浮动明显，可复现的是 allocs/op 与 B/op 这类结构性性质。压缩路径按帧复用 flate 编解码器（`sync.Pool` + `Reset`），池化后压缩往返 4.1 倍提速、分配降 162 倍（DESIGN §10-D11）。
 
 质量与验证口径：库包语句覆盖 100.0%（CI 门禁跌破即失败；语句计数随 Go 工具链版本不同——1.24 与 stable 两腿实测均为 100.0%，故只记百分比不记分母，两个示例包同为 100.0%）；212 个测试/基准/fuzz 函数；`-race -count=1` 全绿（CI 门禁同款）加 goroutine 泄漏守卫；五条 fuzz 靶 CI 冒烟（长跑累计千万级 execs，实锤修复「测试里抓到的真 bug」一节的第 1、2 条）；八件静态检查（vet/gofmt/gosec/revive/staticcheck/gocritic/nilness/govulncheck）与五平台交叉编译全部落成 CI 门禁。方法学与逐项数据见 [docs/DESIGN.md](docs/DESIGN.md) §11，本地复现命令见下文「贡献指引」。
 
